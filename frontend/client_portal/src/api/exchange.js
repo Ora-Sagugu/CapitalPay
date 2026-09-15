@@ -29,3 +29,6 @@ export function importCsvRates(formData) {
 export function convertRate(data) {
   return request.post('/v1/admin/exchange-rates/convert/', data)
 }
+export function getExchangeStats() {
+  return request.get('/v1/admin/exchange-rates/stats/')
+}

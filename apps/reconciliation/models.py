@@ -30,6 +30,9 @@ class ReconciliationBatch(BaseModel):
     bank_code = models.CharField(max_length=16, verbose_name="银行编码")
     bank_name = models.CharField(max_length=128, blank=True, verbose_name="银行名称")
     reconciliation_date = models.DateField(db_index=True, verbose_name="对账日")
+    recon_type = models.CharField(
+        max_length=24, default="TRANSACTION", db_index=True, verbose_name="对账类型"
+    )  # TRANSACTION / SETTLEMENT_FUND
 
     # ── 对账文件 ──
     statement_file = models.CharField(max_length=512, blank=True, verbose_name="银行对账单文件路径")
@@ -144,3 +147,66 @@ class NostroBalanceCheck(BaseModel):
         verbose_name = "Nostro余额核对"
         verbose_name_plural = verbose_name
         ordering = ["-check_date"]
+
+
+class ReconAlertConfig(BaseModel):
+    """对账差异预警配置（单例）。"""
+
+    enabled = models.BooleanField(default=True, verbose_name="是否启用")
+    webhook_url = models.CharField(max_length=512, blank=True, verbose_name="Webhook URL")
+    email = models.EmailField(blank=True, verbose_name="告警邮箱")
+
+    class Meta:
+        db_table = "recon_alert_config"
+        verbose_name = "对账预警配置"
+        verbose_name_plural = verbose_name
+
+    @classmethod
+    def get_config(cls) -> "ReconAlertConfig":
+        obj, _ = cls.objects.get_or_create(
+            is_deleted=False,
+            defaults={"enabled": True, "webhook_url": "", "email": ""},
+        )
+        return obj
+
+
+class ReconAlert(BaseModel):
+    """对账差异预警 — 站内通知，并可投递 Webhook / 邮件。"""
+
+    class Severity(models.TextChoices):
+        WARNING = "WARNING", "警告"
+        CRITICAL = "CRITICAL", "严重"
+
+    class Channel(models.TextChoices):
+        IN_APP = "IN_APP", "站内"
+        WEBHOOK = "WEBHOOK", "Webhook"
+        EMAIL = "EMAIL", "邮件"
+
+    class AlertStatus(models.TextChoices):
+        OPEN = "OPEN", "待确认"
+        ACKED = "ACKED", "已确认"
+
+    batch = models.ForeignKey(
+        ReconciliationBatch, on_delete=models.CASCADE, related_name="alerts", verbose_name="对账批次"
+    )
+    severity = models.CharField(
+        max_length=16, choices=Severity.choices, default=Severity.WARNING, verbose_name="级别"
+    )
+    title = models.CharField(max_length=128, verbose_name="标题")
+    summary = models.TextField(blank=True, verbose_name="摘要")
+    channel = models.CharField(
+        max_length=16, choices=Channel.choices, default=Channel.IN_APP, verbose_name="渠道"
+    )
+    status = models.CharField(
+        max_length=16, choices=AlertStatus.choices, default=AlertStatus.OPEN, verbose_name="状态"
+    )
+    sent_at = models.DateTimeField(null=True, blank=True, verbose_name="投递时间")
+    delivery_error = models.CharField(max_length=256, blank=True, verbose_name="投递失败原因")
+    acked_by = models.CharField(max_length=64, blank=True, verbose_name="确认人")
+    acked_at = models.DateTimeField(null=True, blank=True, verbose_name="确认时间")
+
+    class Meta:
+        db_table = "recon_alert"
+        verbose_name = "对账预警"
+        verbose_name_plural = verbose_name
+        ordering = ["-created_at"]

@@ -1,81 +1,62 @@
 <template>
-  <el-card class="page-card" shadow="never">
-    <template #header>
-      <div class="header">
-        <span class="card-title">预清算管理</span>
-        <el-tag type="warning">PENDING_SETTLE</el-tag>
+  <div>
+    <PageHeader title="Pre-orders" subtitle="Approved instructions awaiting correspondent clearing" />
+    <KpiCards :items="kpis" />
+    <div class="page-card">
+      <div class="toolbar">
+        <el-input v-model="filters.search" placeholder="Order reference / PRN / customer" clearable style="width: 220px" />
+        <el-select v-model="filters.from_currency" placeholder="Source currency" clearable style="width: 120px">
+          <el-option v-for="c in CURRENCIES" :key="c.value" :label="c.value" :value="c.value" />
+        </el-select>
+        <el-select v-model="filters.to_currency" placeholder="Destination currency" clearable style="width: 120px">
+          <el-option v-for="c in CURRENCIES" :key="c.value" :label="c.value" :value="c.value" />
+        </el-select>
+        <el-button type="primary" @click="reload">Search</el-button>
+        <el-button @click="reset">Reset</el-button>
       </div>
-    </template>
-    <div class="toolbar">
-      <el-input v-model="filters.search" placeholder="订单号 / PRN / 商户" clearable style="width: 240px" @keyup.enter="reload" />
-      <el-button type="primary" @click="reload">查询</el-button>
-      <el-button @click="loadStats">刷新统计</el-button>
+      <el-table :data="rows" v-loading="loading">
+        <el-table-column type="selection" width="42" />
+        <el-table-column prop="order_no" label="Order reference" min-width="170" />
+        <el-table-column prop="prn_code" label="PRN" min-width="110" />
+        <el-table-column prop="merchant_name" label="Customer" min-width="140" />
+        <el-table-column prop="from_currency" label="Source" min-width="90" />
+        <el-table-column prop="to_currency" label="Destination" min-width="110" />
+        <el-table-column prop="fee_amount" label="Charges" min-width="90" :formatter="formatMoneyCell" />
+        <el-table-column prop="beneficiary_name" label="Beneficiary" min-width="120" />
+        <el-table-column label="Status" width="110"><template #default="{ row }"><StatusPill :value="row.status" /></template></el-table-column>
+        <el-table-column label="Creation Time" min-width="160"><template #default="{ row }">{{ datetime(row.created_at) }}</template></el-table-column>
+      </el-table>
     </div>
-    <el-row :gutter="12" style="margin-bottom: 16px" v-if="stats">
-      <el-col :span="6"><el-statistic title="待清算笔数" :value="stats.total_count" /></el-col>
-      <el-col :span="6"><el-statistic title="金额合计" :value="stats.total_amount" /></el-col>
-      <el-col :span="6"><el-statistic title="结算金额" :value="stats.total_settle_amount" /></el-col>
-      <el-col :span="6"><el-statistic title="手续费" :value="stats.total_fee" /></el-col>
-    </el-row>
-    <el-table :data="rows" v-loading="loading" border stripe>
-      <el-table-column prop="order_no" label="订单号" min-width="180" />
-      <el-table-column prop="prn_code" label="PRN" min-width="120" />
-      <el-table-column prop="merchant_name" label="商户" min-width="140" />
-      <el-table-column prop="amount" label="金额" min-width="100" />
-      <el-table-column prop="settle_amount" label="结算金额" min-width="110" />
-      <el-table-column prop="beneficiary_name" label="收款人" min-width="120" />
-      <el-table-column prop="status" label="状态" width="140" />
-      <el-table-column prop="created_at" label="创建时间" min-width="160" />
-    </el-table>
-    <el-pagination class="toolbar" background layout="total, prev, pager, next" :total="total" :page-size="pageSize" :current-page="page" @current-change="onPage" />
-  </el-card>
+  </div>
 </template>
 
 <script setup>
-import { ref, reactive, onMounted } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
+import PageHeader from '@/components/PageHeader.vue'
+import KpiCards from '@/components/KpiCards.vue'
+import StatusPill from '@/components/StatusPill.vue'
 import { getPreorders, getPreorderStats } from '@/api/orders'
+import { unwrapList, datetime, CURRENCIES, money, formatMoneyCell } from '@/utils/format'
 
 const rows = ref([])
-const total = ref(0)
-const page = ref(1)
-const pageSize = ref(20)
+const stats = ref({})
 const loading = ref(false)
-const stats = ref(null)
-const filters = reactive({ search: '' })
-
+const filters = reactive({ search: '', from_currency: '', to_currency: '' })
+const kpis = computed(() => [
+  { label: 'Instructions pending clearing', value: stats.value.total_count ?? 0 },
+  { label: 'Aggregate amount pending clearing', value: money(stats.value.total_amount) },
+  { label: 'Aggregate charges', value: money(stats.value.total_fee) },
+  { label: 'Created today', value: stats.value.today_count ?? 0 }
+])
 async function load() {
   loading.value = true
   try {
-    const data = await getPreorders({
-      page: page.value,
-      page_size: pageSize.value,
-      search: filters.search || undefined
-    })
-    rows.value = data.results || []
-    total.value = data.count || 0
-  } finally {
-    loading.value = false
-  }
+    stats.value = await getPreorderStats()
+    const data = await getPreorders({ ...Object.fromEntries(Object.entries(filters).filter(([, v]) => v)) })
+    rows.value = unwrapList(data).rows
+  } finally { loading.value = false }
 }
-async function loadStats() {
-  stats.value = await getPreorderStats()
-}
-function reload() {
-  page.value = 1
-  load()
-}
-function onPage(p) {
-  page.value = p
-  load()
-}
-onMounted(() => {
-  load()
-  loadStats()
-})
+function reload() { load() }
+function reset() { Object.assign(filters, { search: '', from_currency: '', to_currency: '' }); load() }
+onMounted(load)
 </script>
-
-<style scoped>
-.header { display: flex; align-items: center; gap: 12px; }
-.card-title { font-weight: 600; }
-.toolbar { margin: 12px 0; display: flex; gap: 8px; }
-</style>

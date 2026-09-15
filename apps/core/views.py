@@ -1,98 +1,106 @@
 """Core API views — Dashboard"""
-from rest_framework import views, status
-from rest_framework.response import Response
-from django.db.models import Sum, Count, Q
-from django.utils import timezone
 from datetime import timedelta
+from decimal import Decimal
 
-from apps.rbac.authentication import JWTAuthentication
+from django.db.models import Count, Sum, Value
+from django.db.models.functions import Coalesce, TruncDate
+from django.utils import timezone
+from django.utils.timezone import get_current_timezone
+from rest_framework import views
+from rest_framework.response import Response
+
+from apps.agent.models import Agent
 from apps.merchant.models import Merchant
 from apps.payment.models import PaymentOrder
-from apps.agent.models import Agent
+from apps.rbac.authentication import JWTAuthentication
+from apps.rbac.permissions import RequiresFeature
 
 
-class DashboardView(views.APIView):
+class DashboardView(RequiresFeature, views.APIView):
     """工作台 Dashboard API"""
     authentication_classes = [JWTAuthentication]
+    feature_code = "feature:dashboard"
 
     def get(self, request):
-        today = timezone.now().date()
-        today_start = timezone.make_aware(timezone.datetime.combine(today, timezone.datetime.min.time()))
+        today = timezone.localdate()
+        tz = get_current_timezone()
+        today_start = timezone.make_aware(
+            timezone.datetime.combine(today, timezone.datetime.min.time()), tz
+        )
         today_end = today_start + timedelta(days=1)
 
-        # 今日汇款
         today_orders = PaymentOrder.objects.filter(
             is_deleted=False,
-            pay_received_at__gte=today_start,
-            pay_received_at__lt=today_end,
-            status__in=["PAY_RECEIVED", "PENDING_SETTLE", "SETTLED"],
+            created_at__gte=today_start,
+            created_at__lt=today_end,
         )
         today_count = today_orders.count()
         today_amount = today_orders.aggregate(total=Sum("amount"))["total"] or 0
 
-        # 待处理
         pending_orders = PaymentOrder.objects.filter(
             is_deleted=False,
-            status="PENDING_PAY",
+            status__in=["PENDING_REVIEW", "PENDING_PAY"],
         )
         pending_count = pending_orders.count()
 
-        # 审核中/通过
         reviewing_count = PaymentOrder.objects.filter(
             is_deleted=False,
             status="PAY_RECEIVED",
         ).count()
 
-        # 已完成
         completed_count = PaymentOrder.objects.filter(
             is_deleted=False,
-            status__in=["SETTLED", "PENDING_SETTLE"],
+            status__in=["SETTLED", "PENDING_SETTLE", "COMPLETED"],
         ).count()
         transferred_count = PaymentOrder.objects.filter(
             is_deleted=False,
             status="SETTLED",
         ).count()
 
-        # 失败
         failed_count = PaymentOrder.objects.filter(
             is_deleted=False,
             status="CLOSED",
         ).count()
         from apps.payment.models import RefundOrder
         refund_count = RefundOrder.objects.filter(status="REJECTED").count()
-        cancelled_count = PaymentOrder.objects.filter(
-            is_deleted=False,
-            status="CLOSED",
-        ).count()
+        cancelled_count = failed_count
 
-        # 客户总数
         customer_count = Merchant.objects.filter(is_deleted=False).count()
-
-        # 代理总数
         agent_count = Agent.objects.filter(is_deleted=False).count()
-
-        # 汇款总笔数
         total_orders = PaymentOrder.objects.filter(is_deleted=False).count()
 
-        # 每日汇款额趋势 (最近7天)
-        trend_data = []
-        for i in range(6, -1, -1):
-            day = today - timedelta(days=i)
-            day_start = timezone.make_aware(timezone.datetime.combine(day, timezone.datetime.min.time()))
-            day_end = day_start + timedelta(days=1)
-            day_orders = PaymentOrder.objects.filter(
+        range_key = (request.query_params.get("range") or "7d").lower()
+        range_days = {"7d": 7, "1m": 30, "3m": 90, "6m": 180}.get(range_key, 7)
+        range_start = today_start - timedelta(days=range_days - 1)
+        grouped = (
+            PaymentOrder.objects.filter(
                 is_deleted=False,
-                pay_received_at__gte=day_start,
-                pay_received_at__lt=day_end,
+                created_at__gte=range_start,
+                created_at__lt=today_end,
             )
-            day_total = day_orders.aggregate(total=Sum("amount"))["total"] or 0
+            .annotate(day=TruncDate("created_at", tzinfo=tz))
+            .values("day")
+            .annotate(
+                count=Count("id"),
+                amount=Coalesce(Sum("amount"), Value(Decimal("0.00"))),
+            )
+        )
+        by_day = {
+            (row["day"].isoformat() if hasattr(row["day"], "isoformat") else str(row["day"])): row
+            for row in grouped if row["day"]
+        }
+        trend_data = []
+        for i in range(range_days - 1, -1, -1):
+            day = today - timedelta(days=i)
+            row = by_day.get(day.isoformat()) or {}
             trend_data.append({
                 "date": day.strftime("%m-%d"),
-                "amount": float(day_total),
-                "count": day_orders.count(),
+                "amount": float(row.get("amount") or 0),
+                "count": row.get("count") or 0,
             })
 
         return Response({
+            "today_date": today.isoformat(),
             "today_remittance": {
                 "count": today_count,
                 "amount": float(today_amount),
@@ -100,7 +108,7 @@ class DashboardView(views.APIView):
             "pending": {
                 "count": pending_count,
                 "reviewing": reviewing_count,
-                "approved": 0,  # from RefundOrder approved
+                "approved": 0,
             },
             "completed": {
                 "count": completed_count,

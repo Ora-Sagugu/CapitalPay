@@ -6,20 +6,17 @@
 3. UIN 匹配（汇款附言中的 UIN）+ 金额一致
 4. 金额 + 时间窗口模糊匹配 (±5 分钟)
 
-PRN 提取: remark 中查找 "PRN:"、"PRN"、"prn:"、"prn" 前缀的 6 位数字，
-或独立的 6 位数字（如附言中只有 PRN 码）。
+PRN 提取: remark 中查找 "PRN:" 前缀的 6 位码（代理前缀 + 年积日 + 当日序号），
+或独立的 6 位 PRN（如附言中只有 PRN 码）。
 """
 from __future__ import annotations
-import re
 import csv
 from decimal import Decimal
 from datetime import datetime, timedelta
 from dataclasses import dataclass, field
 from django.utils import timezone
 from apps.payment.models import PaymentOrder
-
-
-PRN_PATTERN = re.compile(r"(?:PRN|prn)[:：\s]*(\d{6})|(?:^|\s)(\d{6})(?:\s|$)")
+from apps.payment.services.prn_service import extract_prn_from_remark, normalize_prn_code
 
 
 @dataclass
@@ -191,8 +188,8 @@ class ReconciliationMatcher:
         - 再判断金额是否一致 → amount_matched=True/False
 
         PRN 提取规则:
-        - "PRN:123456" / "PRN123456" / "prn 123456" → 123456
-        - remark 中独立的 6 位数字 → 123456（优先匹配 PRN 前缀格式）
+        - "PRN:A00101" / "PRNA00101" / "prn A00101" → A00101
+        - remark 中独立的合法 6 位 PRN（前缀 + 001–366 + 01–99）
         """
         # 为银行流水提取 PRN
         bank_prn_index: dict[str, list[BankStatementLine]] = {}
@@ -211,7 +208,7 @@ class ReconciliationMatcher:
         platform_prn_index: dict[str, PlatformOrderLine] = {}
         for order in platform_orders:
             if order.prn_code:
-                platform_prn_index[order.prn_code] = order
+                platform_prn_index[normalize_prn_code(order.prn_code)] = order
 
         if not platform_prn_index:
             return []
@@ -241,30 +238,8 @@ class ReconciliationMatcher:
 
     @staticmethod
     def _extract_prn(remark: str) -> str | None:
-        """从银行流水备注中提取 6 位 PRN 码。
-
-        支持格式:
-        - "PRN:123456" / "PRN123456"
-        - "汇款PRN：123456 请确认"
-        - remark 中独立的 6 位数字
-
-        Returns:
-            PRN 码字符串（6位数字），或 None
-        """
-        if not remark:
-            return None
-
-        # 优先匹配 PRN 前缀格式
-        prefix_match = re.search(r"(?:PRN|prn)[:：\s]*(\d{6})", remark)
-        if prefix_match:
-            return prefix_match.group(1)
-
-        # 回退：remark 中的独立 6 位数字
-        standalone = re.findall(r"(?:^|\s)(\d{6})(?:\s|$)", remark)
-        if standalone:
-            return standalone[0]
-
-        return None
+        """从银行流水备注中提取 6 位 PRN 码。"""
+        return extract_prn_from_remark(remark)
 
     # ── 辅助方法 ──────────────────────────────────────────
 

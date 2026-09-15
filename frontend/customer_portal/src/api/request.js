@@ -1,11 +1,21 @@
 import axios from 'axios'
 import { ElMessage } from 'element-plus'
+import { defaultLoginRouteName, getPortalMode } from '@/config/portal'
 import router from '@/router'
+import {
+  describeTransportError,
+  extractErrorMessage,
+  parseResponseData
+} from './error'
+
+export { extractErrorMessage } from './error'
 
 const service = axios.create({
   baseURL: '/api',
   timeout: 15000
 })
+
+let handlingUnauthorized = false
 
 service.interceptors.request.use(
   (config) => {
@@ -20,23 +30,28 @@ service.interceptors.request.use(
 
 service.interceptors.response.use(
   (response) => response.data,
-  (error) => {
+  async (error) => {
     const status = error.response?.status
-    const data = error.response?.data
-    if (status === 401) {
-      localStorage.removeItem('token')
-      localStorage.removeItem('user')
-      ElMessage.error('登录已过期，请重新登录')
-      router.replace({ name: 'login' })
-    } else {
-      let msg = '请求失败'
-      if (data) {
-        if (typeof data === 'string') msg = data
-        else if (data.message) msg = data.message
-        else if (data.detail) msg = data.detail
-        else if (data.code) msg = data.code
+    const transportMessage = describeTransportError(error)
+    const isAuthRequest = /\/(login|register|refresh)/.test(error.config?.url || '')
+    const data = await parseResponseData(error.response?.data)
+    if (status === 401 && !isAuthRequest) {
+      if (!handlingUnauthorized) {
+        handlingUnauthorized = true
+        const { useAuthStore } = await import('@/store/auth')
+        useAuthStore().logout()
+        ElMessage.error(extractErrorMessage(data, 'The session has expired. Authenticate again.'))
+        const loginName = getPortalMode() === 'agent' || !router.currentRoute.value.path.startsWith('/agent')
+          ? defaultLoginRouteName()
+          : 'agent-login'
+        await router.replace({ name: loginName })
+        setTimeout(() => { handlingUnauthorized = false }, 500)
       }
-      ElMessage.error(msg)
+    } else {
+      const message = transportMessage || extractErrorMessage(data)
+      if (message && !error.config?.skipErrorToast) {
+        ElMessage.error(message)
+      }
     }
     return Promise.reject(error)
   }

@@ -1,4 +1,4 @@
-"""Local development settings — SQLite + LocMem (inherits from base)."""
+"""Local development settings — SQLite (or MYSQL_HOST) + LocMem (inherits from base)."""
 from .base import *  # noqa: F403, F401
 
 # ── Debug toolbar-friendly ──────────────────────────────────
@@ -22,5 +22,3 @@ REST_FRAMEWORK["DEFAULT_RENDERER_CLASSES"] = [
 # ── Media files for local dev (KYC uploads) ──────────────────
 MEDIA_URL = "/media/"
 MEDIA_ROOT = BASE_DIR / "media"
-
-print("[local.py] Loaded — using SQLite + LocMemCache + Swagger UI")

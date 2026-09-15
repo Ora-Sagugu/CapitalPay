@@ -1,36 +1,56 @@
-# B2B 支付系统 — Django 实现
+# CapitalPay
 
-基于 B2B 支付系统功能清单，使用 Python + Django + DRF 实现的完整 B2B 支付平台后端。
+基于 Django REST Framework 与 Vue 3 的支付平台（**CapitalPay**），覆盖预下单、汇款匹配、收款确认、退款、对账和清算结算。
+
+## 角色与余额
+
+对外角色统一称 **Agent / Customer / Bank**（代码标识不变：`agent` / `customer` / `bank` / `merchant` 等）。
+
+| 对外称呼 | 是谁 | 不是谁 |
+| --- | --- | --- |
+| **Agent** | 代客操作方，替名下 Customer 办业务 | 不是收款方 |
+| **Customer** | 资金所有人；指定最终收款账户 | — |
+| **Bank** | 资金通道（本阶段 Mock / 测试数据） | 本地不查银行实金 |
+| **CapitalPay** | 平台：记账、审核、按指令付出 | — |
+
+**余额只认系统账面**（System book），不是银行余额。收款方 = Customer 指定的外部账户，不是 Agent。
+
+**主路径（本地）：** Customer 系统账面有余额 → Agent（或 Customer）提交转账 → CapitalPay 审核 → Mock 付出并扣 Customer 账面。
 
 ## 项目简介
 
-本系统为 B2B（企业对企业）交易场景设计，覆盖从**预下单 → 汇款匹配 → 收款确认 → 退款处理 → 日终对账 → 清算结算**的完整资金链路。
+覆盖从**预下单 → 汇款匹配 → 收款确认 → 退款处理 → 日终对账 → 清算结算**的完整资金链路（银行侧本阶段为 Mock）。
 
 ### 核心业务流程
 
 ```
-企业A下单 → 企业A银行汇款 → 平台自动匹配(UIN) → 确认收款 → 通知企业B
+Customer/Agent 下单 →（Mock）入金记系统账面 → CapitalPay 匹配(PRN)/确认
                                                           ↓
-                                              日终对账 ← 银行对账单
+                                              日终对账 ← Mock 对账单
                                                   ↓
-                                           清算批次(扣手续费) → 结算到企业B
+                              清算批次(扣手续费) → Mock 付出到收款方账户
 ```
 
 ## 技术栈
 
-| 组件 | 技术 | 说明 |
-|------|------|------|
-| Web 框架 | Django 4.2 + DRF 3.14 | MVT + Service Layer |
-| 数据库 | SQLite | 本地 MVP 默认 |
-| 缓存 | LocMemCache | OpenAPI nonce 防重放等 |
-| 定时任务 | `manage.py run_scheduled_jobs` | 对账、清算、关单、通知重试 |
-| 加密 | cryptography (Fernet) | 敏感字段透明加密 |
-| API 鉴权 | HMAC-SHA256 | 商户接口签名验证 |
+
+| 组件     | 技术                             | 说明                  |
+| ------ | ------------------------------ | ------------------- |
+| Web 框架 | Django 4.2 + DRF 3.14          | MVT + Service Layer |
+| 数据库    | SQLite / MySQL 8.0             | 本地默认 SQLite；生产 MySQL 8.0（utf8mb4） |
+| 缓存     | LocMemCache                    | OpenAPI nonce 防重放等  |
+| 定时任务   | `manage.py run_scheduled_jobs` | 对账、清算、关单、通知重试       |
+| 加密     | cryptography (Fernet)          | 敏感字段透明加密            |
+| API 鉴权 | HMAC-SHA256                    | 商户接口签名验证            |
+| 网关     | nginx                          |                     |
+
+
+
 
 ## 项目结构
 
 ```
-b2b_payment_system/
+CapitalPay/
 ├── b2b_payment/                # 项目配置 (settings / urls / wsgi)
 ├── apps/                       # 17 个业务 App
 │   ├── core/                   # 基础层、仪表盘
@@ -50,194 +70,178 @@ b2b_payment_system/
 │   ├── adjustment/             # 调账申请
 │   └── exchange/               # 汇率
 ├── frontend/client_portal/     # Vue3 运营后台
-├── frontend/customer_portal/   # Vue3 客户端门户（注册/KYC）
-├── docs/                       # 对接文档
+├── frontend/customer_portal/   # Vue3 Agent / Customer 门户（注册/KYC）
+├── deploy/                     # 阿里云安装、Nginx、systemd
+├── scripts/                    # 本地启停与部署入口
 ├── manage.py
 ├── requirements.txt
 └── .env.example
 ```
 
-## 需要准备的软件
+详细说明每个目录、前后端页面与后端模块的对应关系，见 **[docs/系统文件导览.md](docs/系统文件导览.md)**。
 
-| 软件 | 是否必需 | 说明 |
-|------|----------|------|
-| Cursor / VS Code | 必需（二选一） | 写代码与开终端 |
-| **Python 3.11 或 3.12** | 必需 | 勿用 3.14；本仓库已用 3.12 重建 `.venv` |
-| **Node.js 18+** | 跑前端时必需 | 运营后台 Vite + Vue3 |
-| Navicat Premium | 可选 | Navicat 可打开 `db.sqlite3` 看表 |
+## 运行与维护
 
-项目作为本地 MVP **可以运行、可以测**（约 70–75%）；银行出金/对账取数仍为 MOCK，不是生产上线完整度。
+本地可用根目录 `START_PROJECT.bat` / `STOP_PROJECT.bat` 一键启停（后端 `:1024`、运营后台 `:1025`、Agent `:1026`、Customer `:1027`）。本地默认使用 SQLite 与 LocMemCache，无需 Docker、Redis 或 Celery；生产使用 MySQL 8.0（可设 `MYSQL_HOST` 在本地联调）。
 
-## 快速启动（Windows PowerShell，推荐）
+### 演示数据（推荐首次启动后执行）
 
-本地默认 **SQLite**，不需要 PostgreSQL / Redis / Docker。
-
-```powershell
-# 1. 进入项目
-cd d:\ProgramData\b2b_payment_system
-
-# 2. 若尚无虚拟环境：用 uv 装 Python 3.12 并建 .venv（已建好可跳过）
-# uv python install 3.12
-# uv venv .venv --python 3.12
-# uv pip install -r requirements.txt --python .\.venv\Scripts\python.exe
-
-# 3. 激活虚拟环境
-.\.venv\Scripts\Activate.ps1
-
-# 4. 迁移 + 演示数据（库已有数据时 seed 会报唯一约束，可改用 --reset）
-$env:DJANGO_SETTINGS_MODULE = "b2b_payment.settings.local"
-python manage.py migrate
-python manage.py seed_data
-# python manage.py seed_data --reset   # 需要清空重灌时再用
-# python manage.py createsuperuser    # 首次无管理员时；现有库已有 admin
-
-# 5. 启动后端（终端 1）
-python manage.py runserver 8001
-
-# 6. 启动运营后台（新开终端）
-cd d:\ProgramData\b2b_payment_system\frontend\client_portal
-npm install
-npm run dev
-
-# 7. 可选：启动客户端门户（新开终端，端口 9001）
-cd d:\ProgramData\b2b_payment_system\frontend\customer_portal
-npm install
-npm run dev
-```
-
-| 地址 | 说明 |
-|------|------|
-| http://localhost:9000/ | 运营后台（Vite，`/api` 代理到 8001） |
-| http://localhost:9001/ | 客户端门户（注册 / KYC / 订单） |
-| http://127.0.0.1:8001/admin/ | Django Admin（已有用户 `admin`） |
-| http://127.0.0.1:8001/api/docs/ | Swagger UI |
-| http://127.0.0.1:8001/api/redoc/ | ReDoc |
-| http://127.0.0.1:8001/api/schema/ | OpenAPI Schema |
-
-Navicat：新建连接 → SQLite → 选择 `d:\ProgramData\b2b_payment_system\db.sqlite3`。
-
-## 银行 / 汇率集成模式
-
-默认全部为 `MOCK`（见 `.env.example`）。切换到真实渠道前需配置凭证，否则会显式失败（不会伪造成功出金）：
-
-| 变量 | 取值 | 说明 |
-|------|------|------|
-| `BANK_GATEWAY_MODE` | MOCK / REAL | 支付、退款、转账、拨付网关 |
-| `BANK_CODES` | 逗号分隔 | 注册的银行编码 |
-| `BANK_RECON_FETCH_MODE` | MOCK / SFTP / API | 对账单拉取 |
-| `BANK_FX_PROVIDER_MODE` | MOCK / REAL | 实时汇率源 |
-
-## API 接口
-
-### 对外接口（商户调用，HMAC 鉴权）
-
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| POST | `/api/v1/payment/pre-order/` | 预下单 |
-| GET | `/api/v1/payment/orders/` | 订单列表查询 |
-| GET | `/api/v1/payment/orders/{order_no}/` | 单笔订单查询 |
-| POST | `/api/v1/payment/orders/{order_no}/close/` | 关闭订单 |
-| POST | `/api/v1/refund/apply/` | 退款申请 |
-| GET | `/api/v1/refund/query/` | 退款查询 |
-
-### 运营管理端（Session/Token 鉴权）
-
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| CRUD | `/api/v1/admin/merchants/` | 商户管理 |
-| CRUD | `/api/v1/admin/orders/` | 支付订单管理 |
-| CRUD | `/api/v1/admin/refunds/` | 退款管理 |
-| CRUD | `/api/v1/admin/recon-batches/` | 对账批次 |
-| CRUD | `/api/v1/admin/recon-diffs/` | 对账差异 |
-| CRUD | `/api/v1/admin/nostro-checks/` | Nostro 余额核对 |
-| CRUD | `/api/v1/admin/settle-batches/` | 清算批次 |
-| CRUD | `/api/v1/admin/settle-details/` | 清算明细 |
-| CRUD | `/api/v1/admin/fee-shares/` | 手续费分润 |
-| CRUD | `/api/v1/admin/difference-writeoffs/` | 差异代销账 |
-| CRUD | `/api/v1/admin/nostro-accounts/` | Nostro 账户 |
-| CRUD | `/api/v1/admin/fund-transfers/` | 资金调拨 |
-| CRUD | `/api/v1/admin/user-payment-details/` | 用户支付明细 |
-| CRUD | `/api/v1/admin/onboarding/` | 终端用户 Onboarding |
-| CRUD | `/api/v1/admin/routing-logs/` | 路由日志（与操作日志分离） |
-| GET | `/api/v1/admin/reports/merchant-daily/` | 商户日收单报表 |
-| GET | `/api/v1/admin/reports/channel-fee/` | 渠道手续费报表 |
-| GET | `/api/v1/admin/reports/platform-summary/` | 平台汇总表 |
-| GET | `/api/v1/admin/reports/settle-batches/` | 结算批次报表 |
-| GET | `/api/v1/admin/reports/settle-details/` | 结算明细报表 |
-
-### HMAC 签名说明
-
-商户调用对外接口需在 Header 中携带：
-
-```
-X-Api-Key:     商户 API Key
-X-Timestamp:   请求时间戳 (Unix)
-X-Nonce:       随机串 (防重放)
-X-Signature:   HMAC-SHA256 签名
-```
-
-签名规则：参数按 key 字母序排序 → `key=value&...` → 追加 `&key={api_secret}` → HMAC-SHA256。
-
-## 关键设计决策
-
-| 决策 | 理由 |
-|------|------|
-| **Service Layer 模式** | 业务逻辑不放 View，因为同一逻辑被 OpenAPI / 运营后台 / 定时命令三个入口调用 |
-| **Decimal 替代 float** | 金融场景 float 有精度丢失，Decimal 精确到分 |
-| **select_for_update 行锁** | 资金操作防并发脏读 |
-| **idempotency_key 幂等** | 防止网络重试导致重复下单 |
-| **Fernet 透明加密** | 身份证号、银行账号等敏感字段加密存储 |
-| **AuditLog append-only** | 审计日志只增不改，save() 时拦截更新 |
-| **BankGateway 抽象层** | 不同银行网关实现统一接口，MockBankGateway 用于开发测试 |
-
-## 运行测试
-
-```powershell
-cd d:\ProgramData\b2b_payment_system
-.\.venv\Scripts\Activate.ps1
-$env:DJANGO_SETTINGS_MODULE = "b2b_payment.settings.local"
-python manage.py test -v2
-# 或指定模块：
-python manage.py test apps.payment.tests_gateway apps.settlement.tests apps.exchange.tests apps.reconciliation.tests -v2
-```
-
-测试覆盖：
-- **Core / Merchant / Payment / RBAC / UserPortal**: 既有业务用例
-- **Gateway / Settlement / Reconciliation / Exchange**: Mock 网关、清算划拨、对账取数、汇率 Provider
-
-## 种子数据
+灌入非洲走廊演示数据（商户、代理、订单、银行通道、对账/清算、门户账号等）：
 
 ```bash
-# 填充演示数据
-python manage.py seed_data
-
-# 清空后重新填充
 python manage.py seed_data --reset
 ```
 
-填充的数据包括：
-- 3 家商户（含 KYC、手续费、结算账户、支付产品配置）
-- 3 个 Nostro 账户 + 1 笔资金调拨
-- 6 个银行通道（含演示流水）
-- 12 笔支付订单（覆盖所有状态：预创建/待收款/已收款/待清算/已清算/已关闭/已退款）
-- 2 笔退款单（含已退款和待审核）
-- 2 批对账（含差异记录和余额核对）
-- 2 批清算（含明细、手续费分润、代销账）
+不加 `--reset` 时若库中已有业务数据可能因唯一约束失败；演示前建议带 `--reset`（会清空业务数据，保留 OFAC/UN 制裁名单）。
 
-## 定时任务
+| 入口 | 账号 | 密码 | 说明 |
+| ---- | ---- | ---- | ---- |
+| [运营后台 :1025](http://localhost:1025/) | `admin` | `123456` | Super Admin（另有 maker/checker/authoriser，密码同） |
+| [Agent :1026](http://localhost:1026/login) | `GraceNyambura@gmail.com` | `123456` | EastAfrica Collection（Horizon + Savannah + Kilimanjaro，多客户 / 资金 / Agent Fee 历史） |
+| Agent | `AdewaleBalogun@gmail.com` | `123456` | Sahel Corridor（下属 Lagos Agro，3 名顾客） |
+| Agent | `AmaSerwaa@gmail.com` | `123456` | Gulf Coast Collections（下属 Cape Coast Export，3 名顾客） |
+| [Customer :1027](http://localhost:1027/login) | `DanielOchieng@gmail.com` | `123456` | Horizon Trade（Grace 下属） |
+| Customer | `MaryAchieng@gmail.com` | `123456` | Savannah Imports（Grace 下属） |
+| Customer | `ChiomaEze@gmail.com` | `123456` | Lagos Agro（Adewale 下属） |
+| Customer | `KwameAsante@gmail.com` | `123456` | Cape Coast Export（Ama 下属） |
 
-用 Django 管理命令手动触发（需要定时时可用 Windows 任务计划程序）：
+门户邮箱注册/登录仅允许 `@gmail.com`；完整名单见 [`docs/账户和密码.md`](docs/账户和密码.md)。
 
-```powershell
-python manage.py run_scheduled_jobs --all
-python manage.py run_scheduled_jobs --job close_expired_orders
+短信验证码演示固定为 `000000`。
+
+演示流程提示：Agent Orders 有待审客户汇款；运营 Orders 有待 CapitalPay 同意的申请；`PAYDEMOPAYOUT01` 已到 `PENDING_PAY`，Confirm transfer 时 ICBC 费率最低但 USD 余额不足，瀑布会推荐下一家银行。
+
+### 启动后入口
+
+| 地址 | 用途 |
+| ---- | ---- |
+| [http://localhost:1025/](http://localhost:1025/) | 运营后台（内置账号 `admin` / `123456`，不可注册） |
+| [http://localhost:1026/login](http://localhost:1026/login) | Agent 注册 / 登录 |
+| [http://localhost:1027/login](http://localhost:1027/login) | Customer 注册 / 登录 |
+
+### 后端辅助地址
+
+| 地址 | 用途 |
+| ---- | ---- |
+| `http://127.0.0.1:1024/admin/` | Django Admin |
+| `http://127.0.0.1:1024/api/docs/` | Swagger UI |
+| `http://127.0.0.1:1024/api/schema/` | OpenAPI Schema |
+
+
+
+
+## 银行 / 汇率集成模式
+
+**银行 API 形态未知：本阶段不做银行侧详细设计，只保留网关/对账等 API 占位。**  
+CapitalPay 侧银行相关一律走 **Mock + 种子/测试数据**（通道余额、合作银行、费率等），余额只认系统账面。
+
+默认全部为 `MOCK`（见 `.env.example`）。切到 `REAL` / SFTP / API 前需真实凭证，否则会显式失败（不会伪造成功出金）：
+
+
+| 变量                      | 取值                | 说明            |
+| ----------------------- | ----------------- | ------------- |
+| `BANK_GATEWAY_MODE`     | MOCK / REAL       | 支付、退款、转账、拨付网关 |
+| `BANK_CODES`            | 逗号分隔              | 注册的银行编码       |
+| `BANK_RECON_FETCH_MODE` | MOCK / SFTP / API | 对账单拉取         |
+| `BANK_FX_PROVIDER_MODE` | MOCK / REAL       | 实时汇率源         |
+
+
+
+
+## API 接口
+
+交互式 schema 见运行中的 `/api/docs/`。
+
+### 商户接口（HMAC）
+
+
+| 方法   | 路径                                         | 说明     |
+| ---- | ------------------------------------------ | ------ |
+| POST | `/api/v1/payment/pre-order/`               | 预下单    |
+| GET  | `/api/v1/payment/orders/`                  | 订单列表查询 |
+| GET  | `/api/v1/payment/orders/{order_no}/`       | 单笔订单查询 |
+| POST | `/api/v1/payment/orders/{order_no}/close/` | 关闭订单   |
+| POST | `/api/v1/refund/apply/`                    | 退款申请   |
+| GET  | `/api/v1/refund/query/`                    | 退款查询   |
+
+
+
+
+### 代理 PRN 接口（HMAC）
+
+代理使用自身 `api_key` / `api_secret`，签名规则与商户一致。
+
+
+| 方法   | 路径                              | 说明                                                                     |
+| ---- | ------------------------------- | ---------------------------------------------------------------------- |
+| POST | `/api/v1/agent/prn/apply/`      | 签发 PRN；可传 `merchant_no`、`amount`、`currency`、`reference`、`expire_hours` |
+| GET  | `/api/v1/agent/prn/{prn_code}/` | 查询 PRN；状态为 `ISSUED`、`BOUND`、`MATCHED` 或 `EXPIRED`                      |
+
+
+
+
+### 运营管理接口（JWT）
+
+登录入口为 `POST /api/v1/admin/auth/login/`，其余商户、订单、退款、账户、代理、合规、对账、清算与报表接口均位于 `/api/v1/admin/`。
+
+### HMAC 签名说明
+
+请求头：
+
+```
+X-Api-Key: <api_key>
+X-Timestamp: <Unix 秒>
+X-Nonce: <单次随机串>
+X-Signature: <小写十六进制摘要>
 ```
 
-| 任务 | 说明 |
-|------|------|
-| `close_expired_orders` | 关闭过期未支付订单 |
-| `retry_failed_notifications` | 通知重试 |
-| `run_daily_reconciliation` | 日终对账 |
-| `check_nostro_balance` | Nostro 账户余额核对 |
-| `run_daily_settlement` | 日终清算 |
-| `suspend_expired_licenses` | 执照过期商户自动暂停 |
+签名原文必须与服务端一致：
+
+```text
+api_key + timestamp + nonce + METHOD + path + [?sorted_query] + [raw_body]
+```
+
+- `METHOD` 使用大写；`path` 不含 query。
+- Query 按 key 升序拼成 `k=v&...`，存在时前置 `?`。
+- Body 使用实际发送的原始字节文本，不能在签名后重新格式化 JSON。
+- 以 `api_secret` 为 key 计算 HMAC-SHA256；时间戳有效期为 ±300 秒，nonce 在窗口内不可复用。
+
+
+
+## 关键设计决策
+
+
+| 决策                       | 理由                                              |
+| ------------------------ | ----------------------------------------------- |
+| **Service Layer 模式**     | 业务逻辑不放 View，因为同一逻辑被 OpenAPI / 运营后台 / 定时命令三个入口调用 |
+| **Decimal 替代 float**     | 金融场景 float 有精度丢失，Decimal 精确到分                   |
+| **select_for_update 行锁** | 资金操作防并发脏读                                       |
+| **idempotency_key 幂等**   | 防止网络重试导致重复下单                                    |
+| **Fernet 透明加密**          | 身份证号、银行账号等敏感字段加密存储                              |
+| **AuditLog append-only** | 审计日志只增不改，save() 时拦截更新                           |
+| **BankGateway 抽象层**      | 不同银行网关实现统一接口，MockBankGateway 用于开发测试             |
+
+
+
+
+## 制裁名单（OFAC / UN）
+
+首次部署或本地初始化时，导入官方全量制裁名单：
+
+```bash
+python manage.py import_all_sanctions --download --reset
+```
+
+仅更新（不清库）：
+
+```bash
+python manage.py import_all_sanctions --download
+```
+
+定时任务（可加入 crontab）：
+
+```bash
+python manage.py run_scheduled_jobs --job refresh_sanction_lists
+```
+
+汇款页收款人姓名/地址输入时会调用 `POST /api/v1/user/payments/sanction-check/` 做实时警告（如 Iran、North Korea）；精确命中 SDN 实体姓名时提交仍会被拦截。

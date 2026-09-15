@@ -5,7 +5,7 @@ from .models import ReconciliationBatch, ReconciliationDiff, NostroBalanceCheck
 
 @admin.register(ReconciliationBatch)
 class ReconciliationBatchAdmin(admin.ModelAdmin):
-    list_display = ["batch_no", "bank_code", "reconciliation_date", "diff_count", "status", "created_at"]
+    list_display = ["batch_no", "bank_code", "bank_name", "reconciliation_date", "diff_count", "status", "created_at"]
     list_filter = ["bank_code", "status", "reconciliation_date"]
     search_fields = ["batch_no"]
 

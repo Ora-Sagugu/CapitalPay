@@ -7,7 +7,7 @@ from apps.core.models import BaseModel
 
 
 class EndUser(BaseModel):
-    """终端用户 — B2B 支付平台面向的付款方（C端用户）。
+    """终端用户 — CapitalPay 面向的付款方（C端用户）。
 
     用户可以通过邮箱/手机号注册，绑定银行账户，发起支付。
     """
@@ -27,7 +27,13 @@ class EndUser(BaseModel):
     # 首次登录资料与审核状态
     onboarding_status = models.CharField(
         max_length=16,
-        choices=[("none", "未填写"), ("pending", "审核中"), ("approved", "已通过"), ("rejected", "已拒绝")],
+        choices=[
+            ("none", "未填写"),
+            ("pending", "待审核"),
+            ("under_review", "审核中"),
+            ("approved", "已通过"),
+            ("rejected", "已拒绝"),
+        ],
         default="none",
         verbose_name="资料审核状态",
     )
@@ -40,6 +46,20 @@ class EndUser(BaseModel):
         "merchant.Merchant", on_delete=models.SET_NULL,
         null=True, blank=True, verbose_name="默认商户"
     )
+    default_agent = models.ForeignKey(
+        "agent.Agent", on_delete=models.SET_NULL,
+        null=True, blank=True, related_name="bound_end_users", verbose_name="默认代理"
+    )
+    portal_role = models.CharField(
+        max_length=16,
+        choices=[
+            ("none", "未选择"),
+            ("customer", "客户"),
+            ("agent", "代理"),
+        ],
+        default="none",
+        verbose_name="门户身份",
+    )
 
     class Meta:
         db_table = "end_user"
@@ -49,6 +69,15 @@ class EndUser(BaseModel):
 
     def __str__(self):
         return f"{self.nickname or self.username}"
+
+    @property
+    def is_authenticated(self):
+        """Expose Django's authenticated-principal contract for DRF permissions."""
+        return True
+
+    @property
+    def is_anonymous(self):
+        return False
 
 
 class UserOnboarding(BaseModel):
@@ -76,10 +105,28 @@ class UserOnboarding(BaseModel):
     agent_code = models.CharField(max_length=64, blank=True, verbose_name="代理编码")
     license_expiry_date = models.DateField(null=True, blank=True, verbose_name="证照到期日")
 
+    class AgentReviewStatus(models.TextChoices):
+        NONE = "none", "无需代理审核"
+        PENDING = "pending", "待代理审核"
+        APPROVED = "approved", "代理已通过"
+        REJECTED = "rejected", "代理已拒绝"
+
+    agent_review_status = models.CharField(
+        max_length=16,
+        choices=AgentReviewStatus.choices,
+        default=AgentReviewStatus.NONE,
+        verbose_name="代理审核状态",
+    )
+    agent_reviewed_at = models.DateTimeField(null=True, blank=True, verbose_name="代理审核时间")
+    agent_reviewer = models.CharField(max_length=64, blank=True, verbose_name="代理审核人")
+    agent_remark = models.CharField(max_length=512, blank=True, verbose_name="代理审核备注")
+
     # ── 第二步：财务信息 ──
     bank_name = models.CharField(max_length=256, blank=True, verbose_name="开户银行")
     branch_name = models.CharField(max_length=256, blank=True, verbose_name="支行名称")
+    account_name = models.CharField(max_length=256, blank=True, verbose_name="账户名")
     bank_account = models.CharField(max_length=128, blank=True, verbose_name="银行账号")
+    swift_code = models.CharField(max_length=16, blank=True, verbose_name="SWIFT代码")
 
     # ── 第三步：上传图片 ──
     license_image = models.TextField(blank=True, verbose_name="营业执照图片")

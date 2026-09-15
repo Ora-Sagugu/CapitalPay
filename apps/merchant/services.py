@@ -10,7 +10,15 @@ from django.utils import timezone
 from apps.core.exceptions import BusinessException, ErrorCode
 from apps.core.utils import encrypt_field, decrypt_field
 from apps.account.models import NostroAccount
-from .models import Merchant, MerchantKYC, MerchantFee, MerchantSettlementAccount, MerchantPaymentProduct
+from .models import (
+    Merchant,
+    MerchantKYC,
+    MerchantFee,
+    MerchantSettlementAccount,
+    MerchantPaymentProduct,
+    MerchantStatusEvent,
+)
+from .serializers import _linked_username
 
 
 def ensure_merchant_account(merchant: Merchant) -> NostroAccount | None:
@@ -26,7 +34,7 @@ def ensure_merchant_account(merchant: Merchant) -> NostroAccount | None:
         merchant=merchant,
         account_no=account_no,
         bank_code="NSTR",
-        bank_name="Techtanium Nostro",
+        bank_name="CapitalPay Nostro",
         account_number=f"ACCT-{merchant.merchant_no}",
         account_type=NostroAccount.AccountType.COLLECTION,
         currency="CNY",
@@ -74,6 +82,168 @@ def ensure_merchant_virtual_account(merchant: Merchant):
     )
 
 
+MULTI_CURRENCIES = ("CNY", "USD", "EUR", "HKD")
+
+
+def ensure_merchant_currency_account(merchant: Merchant, currency: str):
+    """为指定 ISO 币种确保 COLLECTION 母户与对应 VAV 存在。重复调用幂等。"""
+    from apps.account.models import VirtualAccount
+    from apps.core.currencies import is_supported_currency, normalize_currency
+
+    ccy = normalize_currency(currency)
+    if not is_supported_currency(ccy):
+        raise BusinessException("INVALID_CURRENCY", "The currency is not a supported ISO 4217 code")
+
+    master = merchant.nostro_accounts.filter(is_deleted=False, currency=ccy).first()
+    created_master = None
+    if not master:
+        account_no = f"N{datetime.date.today().strftime('%Y%m%d')}{uuid.uuid4().hex[:6].upper()}"
+        master = NostroAccount.objects.create(
+            merchant=merchant,
+            account_no=account_no,
+            bank_code="NSTR",
+            bank_name="CapitalPay Nostro",
+            account_number=f"ACCT-{merchant.merchant_no}-{ccy}",
+            account_type=NostroAccount.AccountType.COLLECTION,
+            currency=ccy,
+            balance=Decimal("0"),
+        )
+        created_master = master
+    if not merchant.virtual_accounts.filter(is_deleted=False, currency=ccy).exists():
+        va_number = f"VAV{datetime.date.today().strftime('%Y%m%d')}{uuid.uuid4().hex[:8].upper()}"
+        VirtualAccount.objects.create(
+            master_account=master,
+            merchant=merchant,
+            va_number=va_number,
+            va_type=VirtualAccount.VaType.VAV,
+            label=f"{merchant.merchant_name} {ccy} VA",
+            reference=f"{merchant.merchant_no}-{ccy}",
+            bank_code=master.bank_code,
+            bank_name=master.bank_name,
+            account_holder=merchant.merchant_name,
+            routing_code="",
+            clearing_network="",
+            country="CN",
+            currency=ccy,
+            status=VirtualAccount.VaStatus.ACTIVE,
+            opened_at=timezone.now(),
+        )
+    return created_master
+
+
+def ensure_merchant_multi_currency_accounts(merchant: Merchant):
+    """Seed / 补齐命令使用：按手册开通 CNY/USD/EUR/HKD 收款账户与对应 VA。"""
+    ensure_merchant_account(merchant)
+    created = []
+    for ccy in MULTI_CURRENCIES:
+        created_master = ensure_merchant_currency_account(merchant, ccy)
+        if created_master:
+            created.append(created_master)
+    return created
+
+
+class MerchantLifecycleService:
+    """商户状态机的唯一写入口。"""
+
+    ALLOWED_TRANSITIONS = {
+        Merchant.Status.PENDING: {Merchant.Status.ACTIVE, Merchant.Status.CLOSED},
+        Merchant.Status.ACTIVE: {Merchant.Status.SUSPENDED, Merchant.Status.CLOSED},
+        Merchant.Status.SUSPENDED: {Merchant.Status.ACTIVE, Merchant.Status.CLOSED},
+        Merchant.Status.CLOSED: set(),
+    }
+
+    @staticmethod
+    def activation_blockers(merchant: Merchant) -> list[dict]:
+        blockers = []
+        today = timezone.localdate()
+        try:
+            kyc_status = merchant.kyc.kyc_status
+        except MerchantKYC.DoesNotExist:
+            kyc_status = ""
+        if kyc_status != MerchantKYC.Status.APPROVED:
+            blockers.append({"code": "KYC_NOT_APPROVED", "message": "Customer due diligence (KYC) has not been approved"})
+        if not merchant.license_expiry_date:
+            blockers.append({"code": "LICENSE_REQUIRED", "message": "The customer's business licence expiry date has not been provided"})
+        elif merchant.license_expiry_date < today:
+            blockers.append({
+                "code": "LICENSE_EXPIRED",
+                "message": f"The customer's business licence expired on {merchant.license_expiry_date}",
+            })
+        if merchant.risk_level == "BLOCKED":
+            blockers.append({"code": "MERCHANT_RISK_BLOCKED", "message": "The customer's risk classification prohibits further transactions"})
+        if merchant.sanction_status != "UN":
+            blockers.append({"code": "MERCHANT_SANCTIONED", "message": "The customer is subject to sanctions restrictions"})
+        product = MerchantPaymentProduct.objects.filter(
+            merchant=merchant,
+            product_type=MerchantFee.ProductType.WIRE_TRANSFER,
+            is_enabled=True,
+            is_deleted=False,
+        ).first()
+        if not product:
+            blockers.append({"code": "PRODUCT_NOT_ENABLED", "message": "The wire-transfer remittance product has not been enabled for this customer"})
+        # Settlement banks may be configured later; remittance eligibility still
+        # checks for a default settlement account separately.
+        return blockers
+
+    @transaction.atomic
+    def transition(
+        self,
+        merchant: Merchant,
+        to_status: str,
+        *,
+        reason_code: str,
+        comment: str = "",
+        actor: str = "",
+        source: str = "API",
+    ) -> Merchant:
+        locked = Merchant.objects.select_for_update().get(pk=merchant.pk)
+        from_status = locked.status
+        if from_status == to_status:
+            return locked
+        if to_status not in self.ALLOWED_TRANSITIONS.get(from_status, set()):
+            raise BusinessException(
+                "MERCHANT_STATUS_TRANSITION_INVALID",
+                f"The customer status may not be changed from {from_status} to {to_status}",
+                409,
+            )
+        if to_status == Merchant.Status.ACTIVE:
+            blockers = self.activation_blockers(locked)
+            if blockers:
+                first = blockers[0]
+                raise BusinessException(first["code"], first["message"], 422)
+
+        now = timezone.now()
+        locked.status = to_status
+        locked.status_reason_code = reason_code
+        locked.status_changed_at = now
+        locked._lifecycle_status_write = True
+        locked.save(update_fields=[
+            "status", "status_reason_code", "status_changed_at", "updated_at",
+        ])
+        MerchantStatusEvent.objects.create(
+            merchant=locked,
+            from_status=from_status,
+            to_status=to_status,
+            reason_code=reason_code,
+            comment=comment,
+            actor=actor,
+            source=source,
+        )
+        merchant.status = locked.status
+        merchant.status_reason_code = locked.status_reason_code
+        merchant.status_changed_at = locked.status_changed_at
+        return locked
+
+    def activate(self, merchant: Merchant, **kwargs) -> Merchant:
+        return self.transition(merchant, Merchant.Status.ACTIVE, **kwargs)
+
+    def suspend(self, merchant: Merchant, **kwargs) -> Merchant:
+        return self.transition(merchant, Merchant.Status.SUSPENDED, **kwargs)
+
+    def close(self, merchant: Merchant, **kwargs) -> Merchant:
+        return self.transition(merchant, Merchant.Status.CLOSED, **kwargs)
+
+
 class MerchantService:
     """商户管理服务。"""
 
@@ -102,6 +272,7 @@ class MerchantService:
     @transaction.atomic
     def set_kyc(self, merchant: Merchant, kyc_data: dict) -> MerchantKYC:
         """设置/更新商户 KYC 信息 — 敏感字段自动加密。"""
+        existing = MerchantKYC.objects.filter(merchant=merchant).first()
         kyc, _ = MerchantKYC.objects.update_or_create(
             merchant=merchant,
             defaults={
@@ -112,26 +283,147 @@ class MerchantService:
                 "registered_capital": kyc_data.get("registered_capital"),
                 "established_date": kyc_data.get("established_date"),
                 "registered_address": kyc_data.get("registered_address", ""),
+                "kyc_status": MerchantKYC.Status.PENDING,
+                "reviewed_at": None,
+                "remark": "",
             },
         )
+        if existing and existing.kyc_status == MerchantKYC.Status.APPROVED:
+            merchant.refresh_from_db()
+            if merchant.status == Merchant.Status.ACTIVE:
+                MerchantLifecycleService().suspend(
+                    merchant,
+                    reason_code="KYC_UPDATED",
+                    comment="关键 KYC 资料已修改，等待重新审核",
+                    actor="system",
+                    source="KYC",
+                )
+        return kyc
+
+    @transaction.atomic
+    def review_kyc(
+        self,
+        merchant: Merchant,
+        review_data: dict,
+        *,
+        actor: str = "",
+    ) -> MerchantKYC:
+        """原子完成 KYC 复核、汇款产品/费率配置与商户激活。"""
+        merchant = Merchant.objects.select_for_update().get(pk=merchant.pk)
+        try:
+            kyc = MerchantKYC.objects.select_for_update().get(merchant=merchant)
+        except MerchantKYC.DoesNotExist:
+            raise BusinessException("KYC_NOT_SUBMITTED", "The customer has not submitted customer due diligence (KYC) information", 422)
+
+        if kyc.kyc_status != MerchantKYC.Status.PENDING:
+            raise BusinessException(
+                "KYC_STATUS_INVALID",
+                f"Customer due diligence (KYC) is currently {kyc.kyc_status} and may not be reviewed again",
+                409,
+            )
+
+        now = timezone.now()
+        if review_data["action"] == "reject":
+            kyc.kyc_status = MerchantKYC.Status.REJECTED
+            kyc.remark = review_data["reason"].strip()
+            kyc.reviewed_at = now
+            kyc.save(update_fields=["kyc_status", "remark", "reviewed_at", "updated_at"])
+            if merchant.status == Merchant.Status.ACTIVE:
+                MerchantLifecycleService().suspend(
+                    merchant,
+                    reason_code="KYC_REJECTED",
+                    comment=kyc.remark,
+                    actor=actor,
+                    source="KYC_REVIEW",
+                )
+            return kyc
+
+        if not merchant.license_expiry_date:
+            raise BusinessException("LICENSE_REQUIRED", "The business licence expiry date must be provided first", 422)
+        if merchant.license_expiry_date < timezone.localdate():
+            raise BusinessException(
+                "LICENSE_EXPIRED",
+                f"The customer's business licence expired on {merchant.license_expiry_date}",
+                422,
+            )
+
+        merchant.risk_level = review_data.get("risk_level", "MEDIUM")
+        merchant.max_single_amount = review_data.get("max_single_amount")
+        merchant.daily_limit = review_data.get("daily_limit")
+        merchant.daily_count = review_data.get("daily_count")
+        merchant.save(update_fields=[
+            "risk_level", "max_single_amount", "daily_limit", "daily_count", "updated_at",
+        ])
+
+        MerchantPaymentProduct.objects.update_or_create(
+            merchant=merchant,
+            product_type=MerchantFee.ProductType.WIRE_TRANSFER,
+            defaults={
+                "is_enabled": True,
+                "max_single_amount": review_data.get("max_single_amount"),
+                "daily_limit": review_data.get("daily_limit"),
+                "is_deleted": False,
+            },
+        )
+
+        current_fee = self.get_current_fee(
+            merchant, MerchantFee.ProductType.WIRE_TRANSFER
+        )
+        fee_values = {
+            "fee_model": review_data.get("fee_model", MerchantFee.FeeModel.PERCENTAGE),
+            "fixed_fee": review_data.get("fixed_fee", Decimal("0")),
+            "fee_rate": review_data.get("fee_rate", Decimal("0")),
+            "min_fee": review_data.get("min_fee", Decimal("0")),
+            "max_fee": review_data.get("max_fee"),
+            "effective_from": timezone.localdate(),
+            "effective_to": None,
+            "is_deleted": False,
+        }
+        if current_fee:
+            for field, value in fee_values.items():
+                setattr(current_fee, field, value)
+            current_fee.save(update_fields=[*fee_values.keys(), "updated_at"])
+        else:
+            MerchantFee.objects.create(
+                merchant=merchant,
+                product_type=MerchantFee.ProductType.WIRE_TRANSFER,
+                **fee_values,
+            )
+
+        kyc.kyc_status = MerchantKYC.Status.APPROVED
+        kyc.remark = review_data.get("reason", "").strip()
+        kyc.reviewed_at = now
+        kyc.save(update_fields=["kyc_status", "remark", "reviewed_at", "updated_at"])
+
+        activated = MerchantLifecycleService().activate(
+            merchant,
+            reason_code="KYC_APPROVED",
+            comment="KYC、汇款产品与费率审核通过",
+            actor=actor,
+            source="KYC_REVIEW",
+        )
+        merchant.status = activated.status
         return kyc
 
     def get_kyc(self, merchant: Merchant) -> dict:
         """获取商户 KYC — 敏感字段解密。"""
         try:
             kyc = merchant.kyc
-            return {
+            payload = {
+                "username": _linked_username(merchant),
                 "merchant_no": merchant.merchant_no,
+                "kyc_status": kyc.kyc_status,
                 "legal_person": kyc.legal_person,
-                "id_number": decrypt_field(kyc.id_number),
+                "id_number": decrypt_field(kyc.id_number) or kyc.id_number_plain,
                 "business_license": decrypt_field(kyc.business_license),
                 "business_scope": kyc.business_scope,
                 "registered_capital": str(kyc.registered_capital) if kyc.registered_capital else None,
-                "established_date": str(kyc.established_date),
+                "established_date": str(kyc.established_date) if kyc.established_date else None,
                 "registered_address": kyc.registered_address,
             }
+            return payload
         except MerchantKYC.DoesNotExist:
-            return {"merchant_no": merchant.merchant_no}
+            return {"username": _linked_username(merchant), "merchant_no": merchant.merchant_no}
 
     # ── 手续费管理 ──────────────────────────────────────────
 
@@ -164,30 +456,50 @@ class MerchantService:
         ).order_by("-effective_from").first()
 
     def calculate_fee(self, merchant: Merchant, amount: Decimal, product_type: str) -> dict:
-        """计算手续费。
+        """计算手续费。优先商户产品费率，否则回落手续费模型 / 商户默认费率。
 
         Returns:
             {"fee_amount": Decimal, "settle_amount": Decimal, "fee_model": str}
         """
+        amount = Decimal(str(amount))
         fee_config = self.get_current_fee(merchant, product_type)
-        if not fee_config:
-            raise BusinessException(ErrorCode.FEE_NOT_CONFIGURED)
-
-        if fee_config.fee_model == MerchantFee.FeeModel.FIXED:
-            fee_amount = fee_config.fixed_fee
-        elif fee_config.fee_model == MerchantFee.FeeModel.PERCENTAGE:
-            fee_amount = amount * fee_config.fee_rate
-            fee_amount = max(fee_amount, fee_config.min_fee)
-            if fee_config.max_fee:
-                fee_amount = min(fee_amount, fee_config.max_fee)
+        if fee_config:
+            if fee_config.fee_model == MerchantFee.FeeModel.FIXED:
+                fee_amount = Decimal(str(fee_config.fixed_fee or 0))
+            elif fee_config.fee_model == MerchantFee.FeeModel.PERCENTAGE:
+                fee_amount = amount * Decimal(str(fee_config.fee_rate or 0))
+                fee_amount = max(fee_amount, Decimal(str(fee_config.min_fee or 0)))
+                if fee_config.max_fee:
+                    fee_amount = min(fee_amount, Decimal(str(fee_config.max_fee)))
+            else:
+                # TIERED：无阶梯配置时按比例计算
+                fee_amount = amount * Decimal(str(fee_config.fee_rate or 0))
+                if fee_config.fixed_fee:
+                    fee_amount += Decimal(str(fee_config.fixed_fee))
+                fee_amount = max(fee_amount, Decimal(str(fee_config.min_fee or 0)))
+                if fee_config.max_fee:
+                    fee_amount = min(fee_amount, Decimal(str(fee_config.max_fee)))
+            fee_model = fee_config.fee_model
         else:
-            fee_amount = Decimal("0")  # TIERED 需要额外实现
+            from apps.param.models import FeeModel
+            from apps.param.services import compute_fee_from_model
 
+            model = FeeModel.objects.filter(status="active").order_by("model_code").first()
+            if model:
+                fee_amount = compute_fee_from_model(model, amount)
+                fee_model = model.fee_type.upper()
+            elif merchant.fee_rate or merchant.fixed_fee:
+                fee_amount = amount * (merchant.fee_rate or Decimal("0")) + (merchant.fixed_fee or Decimal("0"))
+                fee_model = "MERCHANT_DEFAULT"
+            else:
+                raise BusinessException(ErrorCode.FEE_NOT_CONFIGURED)
+
+        fee_amount = Decimal(str(fee_amount)).quantize(Decimal("0.01"))
         settle_amount = amount - fee_amount
         return {
             "fee_amount": fee_amount,
             "settle_amount": settle_amount,
-            "fee_model": fee_config.fee_model,
+            "fee_model": fee_model,
         }
 
     # ── 结算账户管理 ────────────────────────────────────────

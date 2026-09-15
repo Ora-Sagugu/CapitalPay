@@ -6,9 +6,9 @@ from django.test import TestCase
 from django.utils import timezone
 
 from apps.merchant.models import Merchant, MerchantFee
-from apps.merchant.services import MerchantService
+from apps.merchant.services import MerchantLifecycleService, MerchantService
 from apps.payment.models import PaymentOrder, RefundOrder
-from apps.payment.serializers import RemittanceApplySerializer
+from apps.payment.serializers import RemittanceSubmitSerializer
 from apps.payment.services.pre_order import PreOrderService
 from apps.payment.services.payment import PaymentConfirmService
 from apps.payment.services.refund import RefundService
@@ -55,9 +55,9 @@ class PreOrderServiceTest(TestCase):
         self.assertEqual(order.merchant.merchant_no, "PAY_M001")
         self.assertEqual(order.amount, Decimal("100000.00"))
         # 100000 * 0.003 = 300
-        self.assertEqual(order.fee_amount, Decimal("300.000"))
+        self.assertEqual(order.fee_amount, Decimal("300.00"))
         self.assertEqual(order.settle_amount, Decimal("99700.00"))
-        self.assertEqual(order.status, PaymentOrder.OrderStatus.PRE_CREATE)
+        self.assertEqual(order.status, PaymentOrder.OrderStatus.PENDING_PAY)
         self.assertTrue(order.order_no.startswith("P"))
         self.assertTrue(order.unique_identification_no.startswith("UIN"))
         self.assertEqual(len(order.status_history), 1)
@@ -84,8 +84,13 @@ class PreOrderServiceTest(TestCase):
 
     def test_create_pre_order_inactive_merchant(self):
         """非活跃商户不能下单。"""
-        self.merchant.status = Merchant.Status.SUSPENDED
-        self.merchant.save()
+        MerchantLifecycleService().suspend(
+            self.merchant,
+            reason_code="TEST_SUSPEND",
+            comment="test",
+            actor="tests",
+            source="TEST",
+        )
         with self.assertRaises(BusinessException) as ctx:
             self.service.create_pre_order(
                 merchant_no="PAY_M001",
@@ -125,6 +130,7 @@ class PreOrderServiceTest(TestCase):
             merchant_order_no="MO006",
             amount=Decimal("1000.00"),
             pay_method="WIRE_TRANSFER",
+            bank_code="CMB",
         )
         self.assertEqual(order.fee_amount, Decimal("10.00"))
 
@@ -136,6 +142,7 @@ class PreOrderServiceTest(TestCase):
             merchant_order_no="MO007",
             amount=Decimal("500000.00"),
             pay_method="WIRE_TRANSFER",
+            bank_code="CMB",
         )
         self.assertEqual(order.fee_amount, Decimal("500.00"))
 
@@ -151,6 +158,7 @@ class PaymentConfirmServiceTest(TestCase):
         self.merchant = Merchant.objects.create(
             merchant_no="CONF_M001",
             merchant_name="确认测试商户",
+            status=Merchant.Status.ACTIVE,
             api_key="ak_conf_001",
             api_secret="sk_conf_secret",
         )
@@ -251,6 +259,7 @@ class RefundServiceTest(TestCase):
         self.merchant = Merchant.objects.create(
             merchant_no="RF_M001",
             merchant_name="退款测试商户",
+            status=Merchant.Status.ACTIVE,
             api_key="ak_rf_001",
             api_secret="sk_rf_secret",
         )
@@ -325,6 +334,8 @@ class RefundServiceTest(TestCase):
             pay_method="WIRE_TRANSFER",
             bank_code="CMB",
         )
+        CloseOrderService().close_order(new_order)
+        new_order.refresh_from_db()
         with self.assertRaises(BusinessException) as ctx:
             self.service.request_refund(
                 payment_order=new_order,
@@ -382,6 +393,7 @@ class CloseOrderServiceTest(TestCase):
         self.merchant = Merchant.objects.create(
             merchant_no="CL_M001",
             merchant_name="关单测试商户",
+            status=Merchant.Status.ACTIVE,
             api_key="ak_cl_001",
             api_secret="sk_cl_secret",
         )
@@ -429,66 +441,38 @@ class CloseOrderServiceTest(TestCase):
         self.assertEqual(ctx.exception.code, ErrorCode.ORDER_STATUS_INVALID)
 
 
-class RemittanceApplySerializerTest(TestCase):
-    """汇款申请序列化器测试 — 验证 merchant_no 解析。"""
+class RemittanceSubmitSerializerTest(TestCase):
+    """提交序列化器只接收报价与收款信息，金额不得由客户端重算。"""
 
-    def setUp(self):
-        self.merchant = Merchant.objects.create(
-            merchant_no="RMT_M001",
-            merchant_name="汇款测试商户",
-            status=Merchant.Status.ACTIVE,
-            fee_rate=Decimal("0.5"),
-            fixed_fee=Decimal("2.00"),
-        )
-
-    def test_accept_merchant_no(self):
-        """使用 merchant_no 提交汇款申请成功。"""
-        data = {
-            "merchant": "RMT_M001",
-            "from_currency": "USD",
-            "to_currency": "CNY",
-            "amount": "10000.00",
-            "pay_method": "WIRE_TRANSFER",
-            "fee_bearing": "OUR",
+    def valid_data(self):
+        return {
+            "quote_id": "RQT20260830000000000001",
             "beneficiary_name": "张三",
             "beneficiary_bank": "中国银行",
-            "beneficiary_swift": "BKCHCNBJ",
             "beneficiary_account": "6217001234567890",
+            "beneficiary_swift": "BKCHCNBJ",
             "beneficiary_address": "北京市朝阳区",
             "remittance_purpose": "货款",
         }
-        serializer = RemittanceApplySerializer(data=data)
-        self.assertTrue(serializer.is_valid(), serializer.errors)
-        order = serializer.save()
-        self.assertEqual(order.merchant.merchant_no, "RMT_M001")
-        self.assertEqual(order.amount, Decimal("10000.00"))
-        self.assertEqual(order.status, "PENDING_REVIEW")
 
-    def test_merchant_not_found(self):
-        """不存在的 merchant_no 返回验证错误。"""
-        data = {
-            "merchant": "NOT_EXIST",
-            "from_currency": "USD",
-            "to_currency": "CNY",
-            "amount": "10000.00",
-            "pay_method": "WIRE_TRANSFER",
-        }
-        serializer = RemittanceApplySerializer(data=data)
+    def test_accepts_quote_and_beneficiary_payload(self):
+        serializer = RemittanceSubmitSerializer(data=self.valid_data())
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        self.assertEqual(
+            serializer.validated_data["quote_id"],
+            "RQT20260830000000000001",
+        )
+
+    def test_quote_is_required(self):
+        data = self.valid_data()
+        data.pop("quote_id")
+        serializer = RemittanceSubmitSerializer(data=data)
         self.assertFalse(serializer.is_valid())
-        self.assertIn("merchant", serializer.errors)
+        self.assertIn("quote_id", serializer.errors)
 
-    def test_fee_calculation(self):
-        """验证手续费计算正确。"""
-        data = {
-            "merchant": "RMT_M001",
-            "from_currency": "USD",
-            "to_currency": "CNY",
-            "amount": "10000.00",
-            "pay_method": "WIRE_TRANSFER",
-        }
-        serializer = RemittanceApplySerializer(data=data)
-        self.assertTrue(serializer.is_valid(), serializer.errors)
-        order = serializer.save()
-        # 10000 * 0.5% + 2.00 = 52.00
-        self.assertEqual(order.fee_amount, Decimal("52.00"))
-        self.assertEqual(order.settle_amount, Decimal("9948.00"))
+    def test_required_beneficiary_fields(self):
+        serializer = RemittanceSubmitSerializer(data={"quote_id": "RQT1"})
+        self.assertFalse(serializer.is_valid())
+        self.assertIn("beneficiary_name", serializer.errors)
+        self.assertIn("beneficiary_bank", serializer.errors)
+        self.assertIn("beneficiary_account", serializer.errors)

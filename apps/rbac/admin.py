@@ -9,6 +9,14 @@ class SystemUserAdmin(admin.ModelAdmin):
     list_filter = ["is_active", "is_locked"]
     search_fields = ["username", "real_name", "phone"]
 
+    def has_add_permission(self, request):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        if obj and obj.username == "admin":
+            return False
+        return super().has_delete_permission(request, obj)
+
 
 @admin.register(Role)
 class RoleAdmin(admin.ModelAdmin):

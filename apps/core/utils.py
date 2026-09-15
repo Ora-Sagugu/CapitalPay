@@ -75,10 +75,16 @@ def encrypt_field(plaintext: str) -> str:
 
 
 def decrypt_field(ciphertext: str) -> str:
-    """解密敏感字段。"""
+    """解密敏感字段。
+
+    兼容资料初审写入的明文：密文无效时原样返回，避免运营审核页 500。
+    """
     if not ciphertext:
         return ciphertext
-    return _get_cipher().decrypt(ciphertext.encode()).decode()
+    try:
+        return _get_cipher().decrypt(ciphertext.encode()).decode()
+    except Exception:
+        return ciphertext
 
 
 # ── 签名工具 ────────────────────────────────────────────────

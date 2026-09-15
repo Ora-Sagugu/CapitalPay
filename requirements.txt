@@ -8,3 +8,4 @@ requests==2.32.3
 openpyxl==3.1.5
 PyJWT==2.9.0
 python-dateutil==2.9.0.post0
+PyMySQL==1.1.1

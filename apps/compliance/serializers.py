@@ -1,13 +1,24 @@
 """Compliance serializers"""
 from rest_framework import serializers
+from .country_names import normalize_country_display
 from .models import SanctionList, SanctionScanRecord, SanctionHitDetail
 
 
 class SanctionListSerializer(serializers.ModelSerializer):
+    entity_type_display = serializers.CharField(
+        source="get_entity_type_display", read_only=True
+    )
+
     class Meta:
         model = SanctionList
         fields = "__all__"
         read_only_fields = ["created_at", "updated_at"]
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        if data.get("country"):
+            data["country"] = normalize_country_display(data["country"])
+        return data
 
 
 class SanctionHitDetailSerializer(serializers.ModelSerializer):

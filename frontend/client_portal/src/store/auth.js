@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia'
 import { login as apiLogin, logout as apiLogout, me as apiMe } from '@/api/auth'
+import { codesForPage, isSuperAdmin } from '@/config/functions'
 
 export const useAuthStore = defineStore('auth', {
   state: () => ({
@@ -8,19 +9,23 @@ export const useAuthStore = defineStore('auth', {
   }),
   getters: {
     isAuthenticated: (state) => !!state.token,
-    displayName: (state) => state.user?.real_name || state.user?.username || '未登录',
+    displayName: (state) => state.user?.real_name || state.user?.username || 'Unauthenticated',
     permissions: (state) => state.user?.permissions || [],
     roles: (state) => state.user?.roles || []
   },
   actions: {
     hasPermission(code) {
       const roles = this.roles || []
-      if (roles.includes('super_admin') || roles.some((r) => (r?.code || r) === 'super_admin')) {
+      if (isSuperAdmin(roles)) {
         return true
       }
       const perms = this.permissions || []
-      if (!perms.length) return true // 无权限列表时不阻断菜单（兼容旧 token）
+      if (!perms.length) return false
       return perms.includes(code) || perms.some((p) => (p?.code || p) === code)
+    },
+    hasPageAccess(page) {
+      if (isSuperAdmin(this.roles)) return true
+      return codesForPage(page).some((code) => this.hasPermission(code))
     },
     async login(account, password) {
       const data = await apiLogin({ account, password })

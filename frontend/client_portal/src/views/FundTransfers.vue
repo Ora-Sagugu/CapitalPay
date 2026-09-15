@@ -1,63 +1,79 @@
 <template>
-  <el-card class="page-card" shadow="never">
-    <div class="toolbar">
-      <el-input v-model="filters.search" placeholder="调拨单号" clearable style="width: 220px" @keyup.enter="reload" />
-      <el-button type="primary" @click="reload">查询</el-button>
-      <el-button @click="reset">重置</el-button>
+  <div>
+    <PageHeader title="Transfers" subtitle="Transfers between nostro accounts" />
+    <div class="page-card">
+      <div class="toolbar">
+        <el-button type="primary" @click="visible = true">Initiate transfer</el-button>
+        <el-button @click="load">Refresh</el-button>
+      </div>
+      <el-table :data="rows" v-loading="loading">
+        <el-table-column prop="transfer_no" label="Transfer no." min-width="150" />
+        <el-table-column prop="from_bank" label="Debit bank" min-width="130" />
+        <el-table-column prop="to_bank" label="Credit bank" min-width="130" />
+        <el-table-column prop="amount" label="Amount" min-width="110" :formatter="formatMoneyCell" />
+        <el-table-column prop="currency" label="Currency" min-width="110" />
+        <el-table-column prop="status" label="Status" width="110" />
+        <el-table-column label="Creation Time" min-width="160"><template #default="{ row }">{{ datetime(row.created_at) }}</template></el-table-column>
+        <el-table-column label="Actions" width="160">
+          <template #default="{ row }">
+            <el-button v-if="row.status === 'PENDING'" link type="success" @click="execute(row)">Execute</el-button>
+          </template>
+        </el-table-column>
+      </el-table>
     </div>
-
-    <el-table :data="rows" v-loading="loading" border stripe>
-      <el-table-column prop="transfer_no" label="调拨单号" min-width="200" />
-      <el-table-column prop="from_account" label="出账账户" min-width="160" />
-      <el-table-column prop="to_account" label="入账账户" min-width="160" />
-      <el-table-column prop="amount" label="金额" min-width="120" />
-      <el-table-column prop="status" label="状态" min-width="120" />
-    </el-table>
-
-    <el-pagination
-      class="toolbar"
-      background
-      layout="total, prev, pager, next"
-      :total="total"
-      :page-size="pageSize"
-      :current-page="page"
-      @current-change="onPage"
-    />
-  </el-card>
+    <el-dialog v-model="visible" title="Initiate transfer" width="480px">
+      <el-form :model="form" label-width="100px">
+        <el-form-item label="Debit account">
+          <el-select v-model="form.from_account" filterable style="width: 100%">
+            <el-option v-for="a in accounts" :key="a.id" :label="`${a.account_no} ${a.bank_name}`" :value="a.id" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="Credit account">
+          <el-select v-model="form.to_account" filterable style="width: 100%">
+            <el-option v-for="a in accounts" :key="a.id" :label="`${a.account_no} ${a.bank_name}`" :value="a.id" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="Amount"><el-input v-model="form.amount" /></el-form-item>
+        <el-form-item label="Currency"><el-input v-model="form.currency" /></el-form-item>
+        <el-form-item label="Narrative"><el-input v-model="form.remark" /></el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="visible = false">Cancel</el-button>
+        <el-button type="primary" @click="save">Submit</el-button>
+      </template>
+    </el-dialog>
+  </div>
 </template>
 
 <script setup>
-import { ref, reactive, onMounted } from 'vue'
-import { getFundTransfers } from '@/api/accounts'
+import { onMounted, reactive, ref } from 'vue'
+import { ElMessage } from 'element-plus'
+import PageHeader from '@/components/PageHeader.vue'
+import { getFundTransfers, createFundTransfer, executeFundTransfer, getNostroAccounts } from '@/api/accounts'
+import { unwrapList, datetime, formatMoneyCell } from '@/utils/format'
 
 const rows = ref([])
-const total = ref(0)
-const page = ref(1)
-const pageSize = ref(20)
+const accounts = ref([])
 const loading = ref(false)
-const filters = reactive({ search: '' })
-
+const visible = ref(false)
+const form = reactive({ from_account: '', to_account: '', amount: '', currency: 'USD', remark: '' })
 async function load() {
   loading.value = true
-  try {
-    const data = await getFundTransfers({ page: page.value, page_size: pageSize.value, search: filters.search || undefined })
-    rows.value = data.results || []
-    total.value = data.count || 0
-  } finally {
-    loading.value = false
-  }
+  try { rows.value = unwrapList(await getFundTransfers({ page_size: 50 })).rows } finally { loading.value = false }
 }
-function reload() {
-  page.value = 1
+async function save() {
+  await createFundTransfer(form)
+  ElMessage.success('The internal fund-transfer instruction has been submitted.')
+  visible.value = false
   load()
 }
-function reset() {
-  filters.search = ''
-  reload()
-}
-function onPage(p) {
-  page.value = p
+async function execute(row) {
+  await executeFundTransfer(row.transfer_no)
+  ElMessage.success('The internal fund transfer has been executed.')
   load()
 }
-onMounted(load)
+onMounted(async () => {
+  accounts.value = unwrapList(await getNostroAccounts({ page_size: 100 })).rows
+  load()
+})
 </script>

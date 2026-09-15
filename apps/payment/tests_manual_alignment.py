@@ -9,7 +9,7 @@ from apps.agent.models import Agent, AgentKYC
 from apps.merchant.models import Merchant
 from apps.merchant.tasks import suspend_expired_licenses
 from apps.payment.models import PaymentOrder, RefundOrder
-from apps.payment.serializers import RemittanceApplySerializer
+from apps.payment.services.remittance_policy import RemittanceEligibilityPolicy
 from apps.payment.views import RefundOrderViewSet
 from apps.rbac.models import SystemUser
 
@@ -31,20 +31,13 @@ class LicenseRestrictTests(TestCase):
         self.assertGreaterEqual(result["suspended"], 1)
 
     def test_remittance_apply_blocks_expired_license(self):
-        from rest_framework.exceptions import ValidationError
-        ser = RemittanceApplySerializer(data={
-            "merchant": self.merchant.merchant_no,
-            "from_currency": "USD",
-            "to_currency": "CNY",
-            "amount": "100",
-            "pay_method": "WIRE_TRANSFER",
-            "beneficiary_name": "Alice",
-            "beneficiary_bank": "Bank",
-            "beneficiary_account": "123",
-        })
-        self.assertTrue(ser.is_valid(), ser.errors)
-        with self.assertRaises(ValidationError):
-            ser.save()
+        decision = RemittanceEligibilityPolicy().evaluate(
+            self.merchant, Decimal("100")
+        )
+        self.assertIn(
+            "LICENSE_EXPIRED",
+            [blocker.code for blocker in decision.blockers],
+        )
 
 
 class AgentKYCApiTests(TestCase):
@@ -85,7 +78,7 @@ class RefundPrnSearchTests(TestCase):
             fee_amount=Decimal("1"),
             settle_amount=Decimal("99"),
             status="PENDING_PAY",
-            prn_code="PRN_SEARCH_XYZ",
+            prn_code="A25501",
             expire_at=date.today() + timedelta(days=7),
         )
         self.refund = RefundOrder.objects.create(
@@ -97,15 +90,17 @@ class RefundPrnSearchTests(TestCase):
             refund_reason="test",
             status="PENDING_REVIEW",
         )
+        from apps.rbac.testing import attach_super_admin
         self.user = SystemUser.objects.create(
             username="refund_tester",
             password_hash="x",
             real_name="Tester",
         )
+        attach_super_admin(self.user)
 
     def test_search_by_prn(self):
         factory = APIRequestFactory()
-        request = factory.get("/api/v1/admin/refunds/", {"search": "PRN_SEARCH_XYZ"})
+        request = factory.get("/api/v1/admin/refunds/", {"search": "A25501"})
         force_authenticate(request, user=self.user)
         view = RefundOrderViewSet.as_view({"get": "list"})
         response = view(request)

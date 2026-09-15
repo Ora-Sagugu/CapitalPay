@@ -3,7 +3,7 @@ import vue from '@vitejs/plugin-vue'
 import { fileURLToPath, URL } from 'node:url'
 
 // 前端 SPA 构建配置
-// 开发时通过 dev proxy 将 /api 转发到 Django 后端 (http://127.0.0.1:8001)
+// 开发时通过 dev proxy 将 /api 转发到 Django 后端 (http://127.0.0.1:1024)
 export default defineConfig({
   plugins: [vue()],
   resolve: {
@@ -12,10 +12,15 @@ export default defineConfig({
     }
   },
   server: {
-    port: 9000,
+    port: 1025,
+    strictPort: true,
     proxy: {
       '/api': {
-        target: 'http://127.0.0.1:8001',
+        target: process.env.VITE_API_TARGET || 'http://127.0.0.1:1024',
+        changeOrigin: true
+      },
+      '/media': {
+        target: process.env.VITE_API_TARGET || 'http://127.0.0.1:1024',
         changeOrigin: true
       }
     }
@@ -23,5 +28,11 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     chunkSizeWarningLimit: 1500
+  },
+  test: {
+    environment: 'jsdom',
+    globals: true,
+    restoreMocks: true,
+    exclude: ['e2e/**', 'node_modules/**', 'dist/**']
   }
 })

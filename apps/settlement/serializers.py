@@ -12,7 +12,7 @@ class SettlementBatchSerializer(serializers.ModelSerializer):
             "id", "batch_no", "settle_date", "merchant", "merchant_name",
             "total_count", "total_amount", "fee_total", "settle_net_amount",
             "status", "settled_at", "fail_reason", "settlement_account_info",
-            "created_at",
+            "created_at", "currency", "bank_txn_id",
         ]
         read_only_fields = fields
 
@@ -40,6 +40,11 @@ class FeeShareSerializer(serializers.ModelSerializer):
     beneficiary_name = serializers.SerializerMethodField()
     beneficiary_bank = serializers.SerializerMethodField()
     currency = serializers.SerializerMethodField()
+    amount = serializers.DecimalField(max_digits=18, decimal_places=2, read_only=True)
+    total_fee = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+    channel_fee = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+    platform_fee = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+    agent_fee = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
 
     class Meta:
         model = FeeShare
@@ -97,11 +102,25 @@ class FeeShareSerializer(serializers.ModelSerializer):
 
 class DifferenceWriteOffSerializer(serializers.ModelSerializer):
     merchant_name = serializers.CharField(source="merchant.merchant_name", read_only=True)
+    merchant_no = serializers.CharField(write_only=True, required=False, allow_blank=True)
 
     class Meta:
         model = DifferenceWriteOff
         fields = [
-            "id", "write_off_no", "merchant", "merchant_name", "amount", "reason",
+            "id", "write_off_no", "merchant", "merchant_name", "merchant_no", "amount", "reason",
             "status", "applied_by", "approved_by", "approved_at", "created_at",
         ]
         read_only_fields = ["id", "write_off_no", "created_at"]
+        extra_kwargs = {"merchant": {"required": False}}
+
+    def validate(self, attrs):
+        merchant_no = attrs.pop("merchant_no", None)
+        if not attrs.get("merchant") and merchant_no:
+            from apps.merchant.models import Merchant
+            merchant = Merchant.objects.filter(merchant_no=merchant_no, is_deleted=False).first()
+            if not merchant:
+                raise serializers.ValidationError({"merchant_no": "The customer does not exist"})
+            attrs["merchant"] = merchant
+        if not attrs.get("merchant"):
+            raise serializers.ValidationError({"merchant": "A customer number or primary key is required"})
+        return attrs

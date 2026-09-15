@@ -42,7 +42,7 @@ def generate_scan_no():
     return f"SC{now.strftime('%Y%m%d%H%M%S')}{rand_part}"
 
 
-def scan_entity(target_name, target_type="PERSON", target_id=""):
+def scan_entity(target_name, target_type="PERSON", target_id="", scan_type="TRANSACTION"):
     """
     扫描实体是否命中制裁名单
     返回: (is_hit, hits_list)
@@ -53,7 +53,7 @@ def scan_entity(target_name, target_type="PERSON", target_id=""):
     # 创建扫描记录
     scan_record = SanctionScanRecord.objects.create(
         scan_no=generate_scan_no(),
-        scan_type="TRANSACTION",
+        scan_type=scan_type,
         target_type=target_type,
         target_id=target_id,
         target_name=target_name,
@@ -118,21 +118,37 @@ def scan_entity_lightweight(beneficiary_name: str, beneficiary_address: str = ""
             "is_clear": bool,
             "name_hits": [{entity_name, list_type, risk_level, match_type, score, country, reason}],
             "address_hits": [{entity_name, list_type, risk_level, keyword, country}],
+            "country_hits": [{country, list_type, risk_level, keyword, reason, match_type}],
             "total_hits": int,
         }
     """
+    from .country_sanctions import detect_sanctioned_country
     from .models import SanctionList
     import difflib
 
     active_lists = SanctionList.objects.filter(is_active=True)
     name_hits = []
     address_hits = []
+    country_hits = []
 
     if not beneficiary_name and not beneficiary_address:
-        return {"is_clear": True, "name_hits": [], "address_hits": [], "total_hits": 0}
+        return {
+            "is_clear": True,
+            "name_hits": [],
+            "address_hits": [],
+            "country_hits": [],
+            "total_hits": 0,
+        }
 
     name_lower = (beneficiary_name or "").strip().lower()
     address_lower = (beneficiary_address or "").strip().lower()
+
+    for field_name, field_value in (
+        ("beneficiary_name", beneficiary_name),
+        ("beneficiary_address", beneficiary_address),
+    ):
+        for hit in detect_sanctioned_country(field_value):
+            country_hits.append({**hit, "field": field_name})
 
     # ── 姓名匹配 ──
     if name_lower:
@@ -252,14 +268,56 @@ def scan_entity_lightweight(beneficiary_name: str, beneficiary_address: str = ""
             unique_name_hits.append(hit)
     name_hits = unique_name_hits
 
-    total_hits = len(name_hits) + len(unique_address_hits)
+    seen_country = set()
+    unique_country_hits = []
+    for hit in country_hits:
+        key = (hit.get("field"), hit.get("country"), hit.get("keyword"))
+        if key not in seen_country:
+            seen_country.add(key)
+            unique_country_hits.append(hit)
+    country_hits = unique_country_hits
+
+    total_hits = len(name_hits) + len(unique_address_hits) + len(country_hits)
 
     return {
         "is_clear": total_hits == 0,
         "name_hits": name_hits,
         "address_hits": unique_address_hits,
+        "country_hits": country_hits,
         "total_hits": total_hits,
     }
+
+
+def build_sanction_warning(name_hits: list, address_hits: list, country_hits: list | None = None) -> str:
+    """Build a human-readable sanctions warning message."""
+    parts = []
+    country_hits = country_hits or []
+    if country_hits:
+        countries = []
+        for hit in country_hits:
+            label = hit.get("country") or hit.get("keyword") or "sanctioned jurisdiction"
+            if label not in countries:
+                countries.append(label)
+        parts.append(
+            "Sanctions warning: input matches sanctioned jurisdiction "
+            + ", ".join(countries[:3])
+            + " (OFAC/UN). Verify beneficiary details before submitting."
+        )
+    if name_hits:
+        high_names = [h["entity_name"] for h in name_hits if h["risk_level"] == "HIGH"]
+        if high_names:
+            parts.append("Beneficiary name matches high-risk sanction list: " + ", ".join(high_names[:3]))
+        else:
+            parts.append("Beneficiary name similar to sanction list: " + ", ".join(h["entity_name"] for h in name_hits[:3]))
+        if len(name_hits) > 3:
+            parts[-1] += f" ({len(name_hits)} total)"
+    if address_hits:
+        high_addrs = [h for h in address_hits if h["risk_level"] == "HIGH"]
+        if high_addrs:
+            parts.append("Beneficiary address matches high-risk sanctioned region: " + ", ".join(h["keyword"] for h in high_addrs[:2]))
+        else:
+            parts.append("Beneficiary address matches sanction list: " + ", ".join(h["keyword"] for h in address_hits[:2]))
+    return "; ".join(parts)
 
 
 def _extract_address_keywords(address: str) -> list:

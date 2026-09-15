@@ -1,8 +1,10 @@
 import request from './request'
 
-// 调账申请
 export function getAdjustments(params) {
   return request.get('/v1/admin/applications/', { params })
+}
+export function createAdjustment(data) {
+  return request.post('/v1/admin/applications/', data)
 }
 export function getAdjustmentDetail(id) {
   return request.get(`/v1/admin/applications/${id}/`)

@@ -1,6 +1,6 @@
 """对账 — DRF 序列化器。"""
 from rest_framework import serializers
-from .models import ReconciliationBatch, ReconciliationDiff, NostroBalanceCheck
+from .models import ReconciliationBatch, ReconciliationDiff, NostroBalanceCheck, ReconAlert, ReconAlertConfig
 
 
 class ReconciliationBatchSerializer(serializers.ModelSerializer):
@@ -8,7 +8,7 @@ class ReconciliationBatchSerializer(serializers.ModelSerializer):
         model = ReconciliationBatch
         fields = [
             "id", "batch_no", "bank_code", "bank_name",
-            "reconciliation_date", "total_count_bank", "total_amount_bank",
+            "reconciliation_date", "recon_type", "total_count_bank", "total_amount_bank",
             "total_count_platform", "total_amount_platform",
             "match_count", "match_amount", "diff_count", "diff_amount",
             "status", "started_at", "completed_at", "created_at",
@@ -52,3 +52,24 @@ class NostroBalanceCheckSerializer(serializers.ModelSerializer):
             "difference", "is_balanced", "remark", "created_at",
         ]
         read_only_fields = fields
+
+
+class ReconAlertSerializer(serializers.ModelSerializer):
+    batch_no = serializers.CharField(source="batch.batch_no", read_only=True)
+    bank_name = serializers.CharField(source="batch.bank_name", read_only=True)
+
+    class Meta:
+        model = ReconAlert
+        fields = [
+            "id", "batch", "batch_no", "bank_name", "severity", "title", "summary",
+            "channel", "status", "sent_at", "delivery_error",
+            "acked_by", "acked_at", "created_at",
+        ]
+        read_only_fields = fields
+
+
+class ReconAlertConfigSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ReconAlertConfig
+        fields = ["id", "enabled", "webhook_url", "email", "updated_at"]
+        read_only_fields = ["id", "updated_at"]

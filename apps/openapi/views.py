@@ -6,11 +6,10 @@
 from rest_framework import status
 from rest_framework.views import APIView
 from rest_framework.response import Response
-from rest_framework.permissions import AllowAny
 from rest_framework.decorators import api_view, authentication_classes, permission_classes
 from django.views.decorators.csrf import csrf_exempt
 
-from .authentication import HMACAuthentication
+from .authentication import HMACAuthentication, HasHMACPrincipal
 from apps.core.exceptions import BusinessException, ErrorCode
 from apps.payment.models import PaymentOrder, RefundOrder
 from apps.payment.serializers import (
@@ -18,13 +17,13 @@ from apps.payment.serializers import (
     RefundRequestSerializer, RefundOrderSerializer,
     PaymentOrderSerializer, PaymentOrderListSerializer,
 )
-from apps.payment.services.pre_order import PreOrderService
+from apps.payment.services.pre_order import PreOrderService, build_cashier_url
 from apps.payment.services.refund import RefundService
 
 
 @api_view(["POST"])
 @authentication_classes([HMACAuthentication])
-@permission_classes([AllowAny])
+@permission_classes([HasHMACPrincipal])
 @csrf_exempt
 def pre_order(request):
     """预下单接口。
@@ -39,7 +38,7 @@ def pre_order(request):
     # merchant 从 HMAC 鉴权中获取
     merchant = getattr(request, "merchant", None) if hasattr(request, "merchant") else None
     if not merchant:
-        return Response({"code": "AUTH_FAILED", "message": "鉴权失败"}, status=401)
+        return Response({"code": "AUTH_FAILED", "message": "Authentication failed"}, status=401)
 
     serializer = PreOrderRequestSerializer(data=request.data)
     serializer.is_valid(raise_exception=True)
@@ -56,8 +55,8 @@ def pre_order(request):
             amount=data["amount"],
             currency=data.get("currency", "CNY"),
             pay_method=data["pay_method"],
-            bank_code=data.get("bank_code"),
             user_id=data.get("user_id"),
+            bank_code=data.get("bank_code"),
             notify_url=data.get("notify_url"),
             idempotency_key=data.get("idempotency_key"),
         )
@@ -74,12 +73,14 @@ def pre_order(request):
         "status": order.status,
         "expire_at": order.expire_at.isoformat(),
         "created_at": order.created_at.isoformat(),
+        "cashier_url": build_cashier_url(order),
+        "pay_method": order.pay_method,
     }, status=status.HTTP_201_CREATED)
 
 
 @api_view(["GET", "POST"])
 @authentication_classes([HMACAuthentication])
-@permission_classes([AllowAny])
+@permission_classes([HasHMACPrincipal])
 @csrf_exempt
 def order_query(request, order_no=None):
     """订单查询接口。
@@ -90,16 +91,19 @@ def order_query(request, order_no=None):
     """
     merchant = getattr(request, "merchant", None) if hasattr(request, "merchant") else None
     if not merchant:
-        return Response({"code": "AUTH_FAILED", "message": "鉴权失败"}, status=401)
+        return Response({"code": "AUTH_FAILED", "message": "Authentication failed"}, status=401)
 
     if request.method == "GET" and not order_no:
         # 订单列表
         merchant_order_no = request.query_params.get("merchant_order_no")
+        status_filter = request.query_params.get("status")
         orders = PaymentOrder.objects.filter(
             merchant=merchant, is_deleted=False
         )
         if merchant_order_no:
             orders = orders.filter(merchant_order_no=merchant_order_no)
+        if status_filter:
+            orders = orders.filter(status=status_filter)
         orders = orders.order_by("-created_at")[:50]
 
         return Response({
@@ -155,12 +159,12 @@ def order_query(request, order_no=None):
         except BusinessException as e:
             return Response({"code": e.code, "message": e.message}, status=e.http_status)
 
-        return Response({"code": "SUCCESS", "message": "订单已关闭"})
+        return Response({"code": "SUCCESS", "message": "The order has been closed"})
 
 
 @api_view(["POST"])
 @authentication_classes([HMACAuthentication])
-@permission_classes([AllowAny])
+@permission_classes([HasHMACPrincipal])
 @csrf_exempt
 def refund_apply(request):
     """退款申请接口。
@@ -170,7 +174,7 @@ def refund_apply(request):
     """
     merchant = getattr(request, "merchant", None) if hasattr(request, "merchant") else None
     if not merchant:
-        return Response({"code": "AUTH_FAILED", "message": "鉴权失败"}, status=401)
+        return Response({"code": "AUTH_FAILED", "message": "Authentication failed"}, status=401)
 
     serializer = RefundRequestSerializer(data=request.data)
     serializer.is_valid(raise_exception=True)
@@ -207,7 +211,7 @@ def refund_apply(request):
 
 @api_view(["GET"])
 @authentication_classes([HMACAuthentication])
-@permission_classes([AllowAny])
+@permission_classes([HasHMACPrincipal])
 @csrf_exempt
 def refund_query(request):
     """退款查询接口。
@@ -216,7 +220,7 @@ def refund_query(request):
     """
     merchant = getattr(request, "merchant", None) if hasattr(request, "merchant") else None
     if not merchant:
-        return Response({"code": "AUTH_FAILED", "message": "鉴权失败"}, status=401)
+        return Response({"code": "AUTH_FAILED", "message": "Authentication failed"}, status=401)
 
     order_no = request.query_params.get("order_no")
     if not order_no:
@@ -243,3 +247,177 @@ def refund_query(request):
             "created_at": r.created_at.isoformat(),
         } for r in refunds],
     })
+
+
+def _require_merchant(request):
+    merchant = getattr(request, "merchant", None)
+    if not merchant:
+        return None, Response({"code": "AUTH_FAILED", "message": "Authentication failed"}, status=401)
+    return merchant, None
+
+
+def _require_agent(request):
+    agent = getattr(request, "agent", None)
+    if not agent:
+        return None, Response({"code": "AUTH_FAILED", "message": "Agent authentication failed"}, status=401)
+    return agent, None
+
+
+@api_view(["POST"])
+@authentication_classes([HMACAuthentication])
+@permission_classes([HasHMACPrincipal])
+@csrf_exempt
+def agent_prn_apply(request):
+    """代理申请 PRN — POST /api/v1/agent/prn/apply/"""
+    agent, err = _require_agent(request)
+    if err:
+        return err
+    from apps.payment.services.prn_service import apply_prn
+    from apps.core.exceptions import BusinessException
+
+    try:
+        issuance = apply_prn(
+            agent,
+            merchant_no=request.data.get("merchant_no") or "",
+            amount=request.data.get("amount"),
+            currency=request.data.get("currency") or "CNY",
+            reference=request.data.get("reference") or "",
+            expire_hours=request.data.get("expire_hours") or 72,
+        )
+    except BusinessException as e:
+        return Response({"code": e.code, "message": e.message}, status=e.http_status)
+    return Response({
+        "code": "SUCCESS",
+        "prn_code": issuance.prn_code,
+        "status": issuance.status,
+        "amount": str(issuance.amount) if issuance.amount is not None else None,
+        "currency": issuance.currency,
+        "reference": issuance.reference,
+        "expires_at": issuance.expires_at.isoformat() if issuance.expires_at else None,
+        "created_at": issuance.created_at.isoformat(),
+    }, status=status.HTTP_201_CREATED)
+
+
+@api_view(["GET"])
+@authentication_classes([HMACAuthentication])
+@permission_classes([HasHMACPrincipal])
+@csrf_exempt
+def agent_prn_query(request, prn_code):
+    """查询代理签发的 PRN — GET /api/v1/agent/prn/{prn}/"""
+    agent, err = _require_agent(request)
+    if err:
+        return err
+    from apps.payment.models import PrnIssuance
+    from django.utils import timezone as tz
+
+    issuance = PrnIssuance.objects.filter(
+        prn_code=prn_code, agent=agent, is_deleted=False,
+    ).first()
+    if not issuance:
+        return Response({"code": "PRN_NOT_FOUND", "message": "The PRN does not exist"}, status=404)
+    if (
+        issuance.status == PrnIssuance.Status.ISSUED
+        and issuance.expires_at
+        and issuance.expires_at < tz.now()
+    ):
+        issuance.status = PrnIssuance.Status.EXPIRED
+        issuance.save(update_fields=["status", "updated_at"])
+    return Response({
+        "code": "SUCCESS",
+        "prn_code": issuance.prn_code,
+        "status": issuance.status,
+        "amount": str(issuance.amount) if issuance.amount is not None else None,
+        "currency": issuance.currency,
+        "reference": issuance.reference,
+        "order_no": issuance.order.order_no if issuance.order_id else None,
+        "expires_at": issuance.expires_at.isoformat() if issuance.expires_at else None,
+        "created_at": issuance.created_at.isoformat(),
+    })
+
+
+@api_view(["GET"])
+@authentication_classes([HMACAuthentication])
+@permission_classes([HasHMACPrincipal])
+@csrf_exempt
+def merchant_pending_funds(request):
+    merchant, err = _require_merchant(request)
+    if err:
+        return err
+    from apps.settlement.models import SettlementBatch, SettlementDetail
+    batches = SettlementBatch.objects.filter(merchant=merchant, status="PENDING", is_deleted=False)
+    details = SettlementDetail.objects.filter(batch__in=batches).select_related("batch")
+    return Response({
+        "code": "SUCCESS",
+        "count": details.count(),
+        "results": [{
+            "order_no": d.order_no,
+            "amount": str(d.amount),
+            "fee": str(d.fee),
+            "settle_amount": str(d.settle_amount),
+            "batch_no": d.batch.batch_no,
+            "status": d.batch.status,
+        } for d in details],
+    })
+
+
+@api_view(["GET"])
+@authentication_classes([HMACAuthentication])
+@permission_classes([HasHMACPrincipal])
+@csrf_exempt
+def merchant_settled_funds(request):
+    merchant, err = _require_merchant(request)
+    if err:
+        return err
+    from apps.settlement.models import SettlementBatch, SettlementDetail
+    batches = SettlementBatch.objects.filter(merchant=merchant, status="SETTLED", is_deleted=False)
+    details = SettlementDetail.objects.filter(batch__in=batches).select_related("batch")
+    return Response({
+        "code": "SUCCESS",
+        "count": details.count(),
+        "results": [{
+            "order_no": d.order_no,
+            "amount": str(d.amount),
+            "fee": str(d.fee),
+            "settle_amount": str(d.settle_amount),
+            "batch_no": d.batch.batch_no,
+            "settled_at": d.batch.settled_at.isoformat() if d.batch.settled_at else None,
+        } for d in details],
+    })
+
+
+@api_view(["GET"])
+@authentication_classes([HMACAuthentication])
+@permission_classes([HasHMACPrincipal])
+@csrf_exempt
+def merchant_settled_funds_export(request):
+    merchant, err = _require_merchant(request)
+    if err:
+        return err
+    from apps.settlement.models import SettlementBatch, SettlementDetail
+    from apps.core.excel_export import excel_response
+    batches = SettlementBatch.objects.filter(merchant=merchant, status="SETTLED", is_deleted=False)
+    details = SettlementDetail.objects.filter(batch__in=batches).select_related("batch")
+    rows = [(d.order_no, str(d.amount), str(d.fee), str(d.settle_amount), d.batch.batch_no) for d in details]
+    return excel_response(
+        ["订单号", "金额", "手续费", "结算金额", "批次号"],
+        rows,
+        f"settled_funds_{merchant.merchant_no}.xlsx",
+    )
+
+
+@api_view(["GET"])
+@authentication_classes([HMACAuthentication])
+@permission_classes([HasHMACPrincipal])
+@csrf_exempt
+def merchant_settled_orders_export(request):
+    merchant, err = _require_merchant(request)
+    if err:
+        return err
+    from apps.core.excel_export import excel_response
+    orders = PaymentOrder.objects.filter(merchant=merchant, status="SETTLED", is_deleted=False)
+    rows = [(o.order_no, o.merchant_order_no, str(o.amount), str(o.fee_amount), o.status, o.created_at.isoformat()) for o in orders]
+    return excel_response(
+        ["平台订单号", "商户订单号", "金额", "手续费", "状态", "创建时间"],
+        rows,
+        f"settled_orders_{merchant.merchant_no}.xlsx",
+    )

@@ -6,6 +6,12 @@ class AdjustmentApplicationSerializer(serializers.ModelSerializer):
     class Meta:
         model = AdjustmentApplication
         fields = "__all__"
+        extra_kwargs = {
+            "application_no": {"required": False},
+            "applicant": {"required": False, "allow_blank": True},
+            "status": {"required": False},
+            "adjustment_amount": {"required": False},
+        }
 
 
 class AdjustmentApplicationListSerializer(serializers.ModelSerializer):

@@ -18,14 +18,32 @@ db.sqlite3-journal
 media/
 staticfiles/
 reconciliation_files/*.csv
+.run/
 
 # Node / frontend
 frontend/**/node_modules/
 frontend/**/dist/
+frontend/**/test-results/
+frontend/**/playwright-report/
+
+# Generated deployment / backups
+/capitalpay.tar.gz
+*.bak.*
 
 # IDE / OS
 .idea/
-.vscode/
+.vscode/*
+!.vscode/settings.json
 *.swp
 .DS_Store
 Thumbs.db
+
+# Debug logs
+debug-*.log
+.cursor/debug-*.log
+
+# Docs — regenerable handbook assets
+docs/~$*.docx
+docs/handbook/raw/
+docs/handbook/annotated/
+docs/handbook/flows/

@@ -1,4 +1,4 @@
-"""Django base settings for B2B Payment System."""
+"""Django base settings for CapitalPay."""
 import os
 from pathlib import Path
 
@@ -84,13 +84,22 @@ TEMPLATES = [
 WSGI_APPLICATION = "b2b_payment.wsgi.application"
 
 # ── Database ────────────────────────────────────────────────
+# Default: SQLite. Set MYSQL_HOST to use MySQL 8.0 (same shape as production).
 
-DATABASES = {
-    "default": {
-        "ENGINE": "django.db.backends.sqlite3",
-        "NAME": BASE_DIR / "db.sqlite3",
+from b2b_payment.db import install_pymysql, mysql_databases_config  # noqa: E402
+
+install_pymysql()
+
+_mysql = mysql_databases_config(required=False)
+if _mysql:
+    DATABASES = {"default": _mysql}
+else:
+    DATABASES = {
+        "default": {
+            "ENGINE": "django.db.backends.sqlite3",
+            "NAME": os.environ.get("SQLITE_DATABASE", BASE_DIR / "db.sqlite3"),
+        }
     }
-}
 
 # ── Cache (OpenAPI nonce anti-replay) ───────────────────────
 
@@ -111,8 +120,8 @@ AUTH_PASSWORD_VALIDATORS = [
 
 # ── Internationalization ────────────────────────────────────
 
-LANGUAGE_CODE = "zh-hans"
-TIME_ZONE = "Asia/Shanghai"
+LANGUAGE_CODE = "en"
+TIME_ZONE = "Africa/Nairobi"
 USE_I18N = True
 USE_TZ = True
 
@@ -122,6 +131,11 @@ STATIC_URL = "static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
 MEDIA_URL = "/media/"
 MEDIA_ROOT = BASE_DIR / "media"
+
+# Official OFAC SDN.CSV / UN consolidated.xml uploads are typically several MB.
+SANCTION_IMPORT_MAX_BYTES = 32 * 1024 * 1024
+FILE_UPLOAD_MAX_MEMORY_SIZE = SANCTION_IMPORT_MAX_BYTES
+DATA_UPLOAD_MAX_MEMORY_SIZE = SANCTION_IMPORT_MAX_BYTES
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
@@ -140,15 +154,19 @@ REST_FRAMEWORK = {
         "rest_framework.renderers.JSONRenderer",
     ],
     "EXCEPTION_HANDLER": "apps.core.exceptions.custom_exception_handler",
-    "DEFAULT_AUTHENTICATION_CLASSES": [],
-    "DEFAULT_PERMISSION_CLASSES": [],
+    "DEFAULT_AUTHENTICATION_CLASSES": [
+        "apps.rbac.authentication.JWTAuthentication",
+    ],
+    "DEFAULT_PERMISSION_CLASSES": [
+        "rest_framework.permissions.IsAuthenticated",
+    ],
 }
 
 # ── drf-spectacular (OpenAPI 文档) ──────────────────────────
 
 SPECTACULAR_SETTINGS = {
-    "TITLE": "B2B 支付系统 API",
-    "DESCRIPTION": "B2B 支付平台后端接口文档 — 预下单、支付确认、退款、对账、清算",
+    "TITLE": "CapitalPay API",
+    "DESCRIPTION": "CapitalPay 后端接口文档 — 预下单、支付确认、退款、对账、清算、内部经营分析。指标口径见 docs/metrics.md。",
     "VERSION": "1.0.0",
     "SERVE_INCLUDE_SCHEMA": False,
     "COMPONENT_SPLIT_REQUEST": True,
@@ -169,8 +187,12 @@ FIELD_ENCRYPTION_KEY = os.environ.get(
 # ── Business ────────────────────────────────────────────────
 
 ORDER_EXPIRE_MINUTES = int(os.environ.get("ORDER_EXPIRE_MINUTES", "30"))
+CASHIER_BASE_URL = os.environ.get("CASHIER_BASE_URL", "http://localhost:1027/pay")
 MAX_REFUND_RATIO = 1.0  # 退款金额不能超过原订单金额
 RECONCILIATION_RETENTION_DAYS = 180
+REPORT_MAX_RANGE_DAYS = int(os.environ.get("REPORT_MAX_RANGE_DAYS", "180"))
+REPORT_MAX_PAGE_SIZE = int(os.environ.get("REPORT_MAX_PAGE_SIZE", "100"))
+REPORT_MAX_EXPORT_ROWS = int(os.environ.get("REPORT_MAX_EXPORT_ROWS", "2000"))
 
 # ── Bank / FX integration ───────────────────────────────────
 BANK_GATEWAY_MODE = os.environ.get("BANK_GATEWAY_MODE", "MOCK").upper()  # MOCK | REAL
@@ -195,3 +217,7 @@ if _raw_keys:
 SMS_PROVIDER_MODE = os.environ.get("SMS_PROVIDER_MODE", "MOCK").upper()  # MOCK | LOG | REAL
 SMS_API_URL = os.environ.get("SMS_API_URL", "")
 SMS_API_KEY = os.environ.get("SMS_API_KEY", "")
+
+# Banking / Agents modules. Set False to hide menus and skip fee splits.
+ENABLE_AGENTS = True
+ENABLE_BANKING = True

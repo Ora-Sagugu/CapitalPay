@@ -10,9 +10,19 @@ JOBS = {
     "close_expired_orders": ("apps.payment.tasks", "close_expired_orders"),
     "retry_failed_notifications": ("apps.payment.tasks", "retry_failed_notifications"),
     "run_daily_reconciliation": ("apps.reconciliation.tasks", "run_daily_reconciliation"),
+    "run_settlement_fund_reconciliation": ("apps.reconciliation.tasks", "run_settlement_fund_reconciliation"),
     "check_nostro_balance": ("apps.reconciliation.tasks", "check_nostro_balance"),
     "run_daily_settlement": ("apps.settlement.tasks", "run_daily_settlement"),
+    "generate_daily_reports": ("apps.report.tasks", "generate_daily_reports"),
     "suspend_expired_licenses": ("apps.merchant.tasks", "suspend_expired_licenses"),
+    "refresh_sanction_lists": ("apps.compliance.tasks", "refresh_sanction_lists"),
+}
+
+# TEMPORARY: skipped while ENABLE_BANKING is False.
+BANKING_JOBS = {
+    "run_daily_reconciliation",
+    "run_settlement_fund_reconciliation",
+    "check_nostro_balance",
 }
 
 
@@ -38,8 +48,13 @@ class Command(BaseCommand):
         if not job and not run_all:
             raise CommandError("请指定 --job <name> 或 --all")
 
+        from django.conf import settings
+
         names = list(JOBS.keys()) if run_all else [job]
         for name in names:
+            if not getattr(settings, "ENABLE_BANKING", True) and name in BANKING_JOBS:
+                self.stdout.write(self.style.WARNING(f"  skipped {name} (ENABLE_BANKING=False)"))
+                continue
             module_path, attr = JOBS[name]
             self.stdout.write(self.style.MIGRATE_HEADING(f"Running {name}..."))
             module = __import__(module_path, fromlist=[attr])

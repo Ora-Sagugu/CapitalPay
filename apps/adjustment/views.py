@@ -2,7 +2,8 @@ from typing import Optional
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
-from rest_framework.permissions import AllowAny
+from rest_framework.permissions import IsAuthenticated
+from apps.rbac.permissions import RequiresFeature
 from .services import AdjustmentService
 from .serializers import (
     AdjustmentApplicationSerializer, AdjustmentApplicationListSerializer,
@@ -11,9 +12,14 @@ from .serializers import (
 from .models import AdjustmentApplication, AdjustmentApproval
 
 
-class AdjustmentApplicationViewSet(viewsets.ViewSet):
+class AdjustmentApplicationViewSet(RequiresFeature, viewsets.ViewSet):
     """差异账调账申请管理"""
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
+    feature_code = "feature:adjustments"
+    ACTION_FEATURES = {
+        "approve": "feature:adjustments.approve",
+        "reject": "feature:adjustments.approve",
+    }
 
     def list(self, request):
         status_param = request.query_params.get("status")
@@ -98,7 +104,7 @@ class AdjustmentApplicationViewSet(viewsets.ViewSet):
         data = {**request.data}
         data["action"] = "reject"
         data.setdefault("approver", getattr(request.user, "username", None) or "admin")
-        data.setdefault("comment", data.get("comment") or data.get("reason") or "拒绝")
+        data.setdefault("comment", data.get("comment") or data.get("reason") or "Rejected")
         ser = AdjustmentApprovalActionSerializer(data=data)
         ser.is_valid(raise_exception=True)
         app = AdjustmentService.reject_application(

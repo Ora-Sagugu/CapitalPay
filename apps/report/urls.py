@@ -5,10 +5,11 @@ from .views import (
     RemittanceReportViewSet,
     MerchantDailyReportViewSet, ChannelFeeReportViewSet,
     PlatformOrderSummaryViewSet, SettlementBatchReportViewSet,
-    SettlementDetailReportViewSet,
+    SettlementDetailReportViewSet, PaymentAnalyticsViewSet,
 )
 
 router = DefaultRouter()
+router.register(r"reports/analytics", PaymentAnalyticsViewSet, basename="report-analytics")
 router.register(r"reports/remittance", RemittanceReportViewSet, basename="report-remittance")
 router.register(r"reports/merchant-daily", MerchantDailyReportViewSet, basename="report-merchant-daily")
 router.register(r"reports/channel-fee", ChannelFeeReportViewSet, basename="report-channel-fee")

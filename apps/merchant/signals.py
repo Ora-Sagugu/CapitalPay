@@ -1,13 +1,21 @@
-"""商户信号 — 注册时自动开通默认账户。"""
+"""商户信号 — 仅记录初始生命周期事件。"""
 from django.db.models.signals import post_save
 from django.dispatch import receiver
-from .models import Merchant
-from .services import ensure_merchant_account, ensure_merchant_virtual_account
+from .models import Merchant, MerchantStatusEvent
 
 
 @receiver(post_save, sender=Merchant)
-def _create_account_on_register(sender, instance, created, **kwargs):
-    """新商户(客户)注册入库后，自动为其创建 Nostro 账户与虚拟账户 (VA)。"""
+def _record_initial_status(sender, instance, created, **kwargs):
+    """新商户先保持待审核，不提前开通活动资金账户。"""
     if created:
-        ensure_merchant_account(instance)
-        ensure_merchant_virtual_account(instance)
+        MerchantStatusEvent.objects.get_or_create(
+            merchant=instance,
+            from_status="",
+            to_status=instance.status,
+            reason_code="MERCHANT_CREATED",
+            defaults={
+                "comment": "商户记录已创建",
+                "actor": "system",
+                "source": "MODEL",
+            },
+        )

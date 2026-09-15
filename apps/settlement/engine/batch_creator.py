@@ -2,20 +2,17 @@
 from datetime import date
 from decimal import Decimal
 from django.db import transaction
-from django.db.models import Sum
 from apps.payment.models import PaymentOrder
-from apps.merchant.models import Merchant
 from apps.merchant.services import MerchantService
-from apps.core.utils import generate_batch_no
+from apps.core.utils import decrypt_field, generate_batch_no
 from ..models import SettlementBatch, SettlementDetail
 
 
 class SettlementBatchCreator:
     """清算批次创建器。
 
-    功能清单对应:
-        - 清算批次创建
-        - 商户清算批次创建
+    按商户 + 币种 + 日期从待清算订单生成批次。
+    创建批次时不把订单标为 SETTLED，须等银行出款成功。
     """
 
     def __init__(self):
@@ -23,10 +20,6 @@ class SettlementBatchCreator:
 
     @transaction.atomic
     def create_daily_batches(self, settle_date: date) -> list[SettlementBatch]:
-        """为所有有交易的商户创建日清算批次。
-
-        从待清算订单 (PENDING_SETTLE) 中按商户分组，生成清算批次。
-        """
         pending = PaymentOrder.objects.filter(
             status=PaymentOrder.OrderStatus.PENDING_SETTLE,
             pay_received_at__date=settle_date,
@@ -36,43 +29,43 @@ class SettlementBatchCreator:
         if not pending.exists():
             return []
 
-        # 按商户分组
-        merchant_groups = {}
+        groups = {}
         for order in pending:
-            m_id = order.merchant_id
-            merchant_groups.setdefault(m_id, []).append(order)
+            if SettlementDetail.objects.filter(payment_order=order).exists():
+                continue
+            currency = order.from_currency or order.currency or ""
+            groups.setdefault((order.merchant_id, currency), []).append(order)
 
         batches = []
-        for merchant_id, orders in merchant_groups.items():
-            batch = self._create_merchant_batch(merchant_id, orders, settle_date)
-            batches.append(batch)
-
+        for (merchant_id, currency), orders in groups.items():
+            batches.append(self._create_merchant_batch(merchant_id, orders, settle_date, currency))
         return batches
 
-    def _create_merchant_batch(self, merchant_id, orders: list[PaymentOrder], settle_date: date) -> SettlementBatch:
-        """为单个商户创建清算批次。"""
+    def _create_merchant_batch(
+        self, merchant_id, orders: list[PaymentOrder], settle_date: date, currency: str
+    ) -> SettlementBatch:
         merchant = orders[0].merchant
+        total_amount = sum((o.amount or Decimal("0")) for o in orders)
+        total_fee = sum((o.fee_amount or Decimal("0")) for o in orders)
+        settle_net = sum((o.settle_amount or Decimal("0")) for o in orders)
 
-        total_amount = sum(o.amount for o in orders)
-        total_fee = sum(o.fee_amount for o in orders)
-        settle_net = sum(o.settle_amount for o in orders)
-
-        # 获取结算账户信息
         settle_account = self.merchant_service.get_default_settlement_account(merchant)
-        account_info = {}
+        account_info = {"currency": currency}
         if settle_account:
-            from apps.core.utils import decrypt_field
-            account_info = {
+            raw_account = decrypt_field(settle_account.account_number) or ""
+            account_info.update({
                 "bank_name": settle_account.bank_name,
                 "account_name": settle_account.account_name,
-                "account_number_masked": "****" + decrypt_field(settle_account.account_number)[-4:],
-            }
+                "account_no": raw_account,
+                "to_account": raw_account,
+                "account_number_masked": ("****" + raw_account[-4:]) if len(raw_account) >= 4 else "****",
+            })
 
-        # 创建批次
         batch = SettlementBatch.objects.create(
             batch_no=generate_batch_no(),
             settle_date=settle_date,
             merchant=merchant,
+            currency=currency or "",
             total_count=len(orders),
             total_amount=total_amount,
             fee_total=total_fee,
@@ -80,8 +73,6 @@ class SettlementBatchCreator:
             status=SettlementBatch.SettleStatus.PENDING,
             settlement_account_info=account_info,
         )
-
-        # 创建清算明细
         SettlementDetail.objects.bulk_create([
             SettlementDetail(
                 batch=batch,
@@ -93,21 +84,4 @@ class SettlementBatchCreator:
             )
             for order in orders
         ])
-
-        # 更新订单状态: PENDING_SETTLE → SETTLED
-        PaymentOrder.objects.filter(
-            pk__in=[o.pk for o in orders]
-        ).update(
-            status=PaymentOrder.OrderStatus.SETTLED,
-            settled_at=transaction.get_connection().ops.value_to_db_datetime(
-                __import__("django").utils.timezone.now()
-            ) if hasattr(transaction.get_connection().ops, "value_to_db_datetime") else None,
-        )
-        # 实际用 Django ORM 的 now():
-        from django.utils import timezone
-        PaymentOrder.objects.filter(pk__in=[o.pk for o in orders]).update(
-            status=PaymentOrder.OrderStatus.SETTLED,
-            settled_at=timezone.now(),
-        )
-
         return batch

@@ -31,6 +31,16 @@ DEFAULT_BASE_RATES = {
     ("GBP", "HKD"): Decimal("9.8937"),
     ("JPY", "CNY"): Decimal("0.04852"),
     ("HKD", "JPY"): Decimal("19.12"),
+    ("USD", "KES"): Decimal("129.45000000"),
+    ("KES", "USD"): Decimal("0.00772500"),
+    ("USD", "NGN"): Decimal("1548.20000000"),
+    ("NGN", "USD"): Decimal("0.00064600"),
+    ("USD", "ZAR"): Decimal("18.35000000"),
+    ("ZAR", "USD"): Decimal("0.05449600"),
+    ("USD", "GHS"): Decimal("15.62000000"),
+    ("GHS", "USD"): Decimal("0.06402100"),
+    ("EUR", "KES"): Decimal("140.92000000"),
+    ("GBP", "KES"): Decimal("164.02000000"),
 }
 
 

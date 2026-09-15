@@ -168,3 +168,210 @@ class TokenGenerationTest(TestCase):
         svc = AuthService()
         with self.assertRaises(Exception):
             svc._decode_token("invalid.token.here")
+
+
+class BuiltinOpsAccountTest(TestCase):
+    """运营后台内置 admin，并保留其他运营账号。"""
+
+    def setUp(self):
+        self.svc = AuthService()
+        Role.objects.create(code="super_admin", name="Super Admin", description="Full access", is_system=True)
+
+    def test_ensure_builtin_account_and_login(self):
+        user = self.svc.ensure_builtin_ops_account()
+        self.assertEqual(user.username, "admin")
+        result = self.svc.admin_login("admin", "123456", ip="127.0.0.1")
+        self.assertEqual(result["user"]["username"], "admin")
+        self.assertIn("super_admin", result["user"]["roles"])
+
+    def test_ensure_creates_super_admin_role_when_missing(self):
+        Role.objects.filter(code="super_admin").delete()
+        user = self.svc.ensure_builtin_ops_account()
+        self.assertTrue(Role.objects.filter(code="super_admin").exists())
+        self.assertIn("super_admin", self.svc.get_user_roles(str(user.id)))
+
+    def test_ensure_keeps_extra_ops_users(self):
+        extra = self.svc.create_user(username="operator_x", password="Op@123456", real_name="Extra")
+        self.svc.ensure_builtin_ops_account()
+        extra.refresh_from_db()
+        self.assertFalse(extra.is_deleted)
+        self.assertTrue(extra.is_active)
+
+
+class OpsUserApiGuardTest(TestCase):
+    """Super Admin 可创建运营账号，但不能删除内置 admin。"""
+
+    def setUp(self):
+        from rest_framework.test import APIClient
+
+        self.client = APIClient()
+        self.svc = AuthService()
+        self.admin = self.svc.ensure_ops_rbac()["admin"]
+        self.client.force_authenticate(self.admin)
+
+    def test_create_ops_user_is_allowed(self):
+        response = self.client.post(
+            "/api/v1/admin/users/",
+            {
+                "username": "newbie",
+                "password": "Pass@123",
+                "real_name": "New Maker",
+                "role_codes": ["maker"],
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, 201, response.content)
+        self.assertTrue(SystemUser.objects.filter(username="newbie").exists())
+
+    def test_delete_builtin_admin_is_rejected(self):
+        response = self.client.delete(f"/api/v1/admin/users/{self.admin.id}/")
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.data["code"], "OPS_ACCOUNT_PROTECTED")
+        self.admin.refresh_from_db()
+        self.assertFalse(self.admin.is_deleted)
+
+
+class FunctionAssignmentApiTest(TestCase):
+    """职位勾选业务后，该角色才能访问对应接口。"""
+
+    def setUp(self):
+        from rest_framework.test import APIClient
+
+        self.client = APIClient()
+        self.svc = AuthService()
+        users = self.svc.ensure_ops_rbac()
+        self.admin = users["admin"]
+        self.maker = users["maker"]
+        self.checker = users["checker"]
+        self.maker_role = Role.objects.get(code="maker")
+        self.admin_role = Role.objects.get(code="super_admin")
+
+    def _login(self, username):
+        result = self.svc.admin_login(username, "123456")
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {result['token']}")
+        return result
+
+    def _pending_order(self):
+        from datetime import timedelta
+        from decimal import Decimal
+
+        from django.utils import timezone
+
+        from apps.merchant.models import Merchant
+        from apps.payment.models import PaymentOrder
+
+        merchant = Merchant.objects.create(
+            merchant_no="RBACORD01",
+            merchant_name="RBAC Order Merchant",
+            status=Merchant.Status.ACTIVE,
+        )
+        return PaymentOrder.objects.create(
+            order_no="RMT_RBAC_REVIEW",
+            merchant_order_no="M_RBAC_REVIEW",
+            unique_identification_no="UIN_RBAC_REVIEW",
+            idempotency_key="IDEM_RBAC_REVIEW",
+            merchant=merchant,
+            amount=Decimal("10.00"),
+            pay_method=PaymentOrder.PayMethod.WIRE_TRANSFER,
+            expire_at=timezone.now() + timedelta(days=1),
+            status=PaymentOrder.OrderStatus.PENDING_REVIEW,
+        )
+
+    def test_list_matrix_and_assign_capabilities(self):
+        self._login("admin")
+        listed = self.client.get("/api/v1/admin/functions/")
+        self.assertEqual(listed.status_code, 200, listed.content)
+        codes = [
+            cap["code"]
+            for group in listed.data["groups"]
+            for cap in group["capabilities"]
+        ]
+        self.assertIn("feature:orders", codes)
+        self.assertIn("feature:orders.approve", codes)
+        self.assertIn("feature:agent_fees", codes)
+        super_admin = next(r for r in listed.data["roles"] if r["code"] == "super_admin")
+        self.assertTrue(super_admin["locked"])
+        maker = next(r for r in listed.data["roles"] if r["code"] == "maker")
+        assigned = self.client.put(
+            f"/api/v1/admin/roles/{maker['id']}/capabilities/",
+            {"capability_codes": ["feature:agent_fees"]},
+            format="json",
+        )
+        self.assertEqual(assigned.status_code, 200, assigned.content)
+        self.assertEqual(assigned.data["capability_codes"], ["feature:agent_fees"])
+
+    def test_super_admin_capabilities_are_locked(self):
+        self._login("admin")
+        blocked = self.client.put(
+            f"/api/v1/admin/roles/{self.admin_role.id}/capabilities/",
+            {"capability_codes": ["feature:orders"]},
+            format="json",
+        )
+        self.assertEqual(blocked.status_code, 400, blocked.content)
+        self.assertEqual(blocked.data["code"], "SUPER_ADMIN_LOCKED")
+
+    def test_maker_can_use_assigned_function_only(self):
+        self.svc.set_role_capabilities(self.maker_role, ["feature:orders"])
+        checker_role = Role.objects.get(code="checker")
+        self.svc.set_role_capabilities(checker_role, ["feature:refunds"])
+
+        maker = self._login("maker")
+        self.assertIn("feature:orders", maker["user"]["permissions"])
+        self.assertNotIn("feature:refunds", maker["user"]["permissions"])
+        orders = self.client.get("/api/v1/admin/orders/")
+        self.assertEqual(orders.status_code, 200, orders.content)
+        refunds = self.client.get("/api/v1/admin/refunds/")
+        self.assertEqual(refunds.status_code, 403)
+
+        self._login("checker")
+        self.assertEqual(self.client.get("/api/v1/admin/refunds/").status_code, 200)
+        self.assertEqual(self.client.get("/api/v1/admin/orders/").status_code, 403)
+
+    def test_approve_code_required_for_order_review(self):
+        order = self._pending_order()
+        self.svc.set_role_capabilities(self.maker_role, ["feature:orders"])
+        self._login("maker")
+        self.assertEqual(self.client.get("/api/v1/admin/orders/").status_code, 200)
+        denied = self.client.post(
+            f"/api/v1/admin/orders/{order.order_no}/review/",
+            {"action": "reject", "reason": "blocked by capability test"},
+            format="json",
+        )
+        self.assertEqual(denied.status_code, 403)
+
+        self.svc.set_role_capabilities(
+            self.maker_role, ["feature:orders", "feature:orders.approve"]
+        )
+        allowed = self.client.post(
+            f"/api/v1/admin/orders/{order.order_no}/review/",
+            {"action": "reject", "reason": "blocked by capability test"},
+            format="json",
+        )
+        self.assertEqual(allowed.status_code, 200, allowed.content)
+
+    def test_approve_only_still_opens_the_page(self):
+        self.svc.set_role_capabilities(self.maker_role, ["feature:orders.approve"])
+        self._login("maker")
+        self.assertEqual(self.client.get("/api/v1/admin/orders/").status_code, 200)
+
+    def test_agent_fee_capability(self):
+        self.svc.set_role_capabilities(self.maker_role, ["feature:agent_fees"])
+        self._login("maker")
+        fees = self.client.get("/api/v1/admin/agent-commissions/")
+        self.assertEqual(fees.status_code, 200, fees.content)
+        self.assertEqual(self.client.get("/api/v1/admin/orders/").status_code, 403)
+
+    def test_unassign_revokes_access(self):
+        self.svc.set_role_capabilities(self.maker_role, ["feature:orders"])
+        self._login("maker")
+        self.assertEqual(self.client.get("/api/v1/admin/orders/").status_code, 200)
+        self.svc.set_role_capabilities(self.maker_role, [])
+        self._login("maker")
+        self.assertEqual(self.client.get("/api/v1/admin/orders/").status_code, 403)
+
+    def test_assign_roles_replaces(self):
+        self.svc.assign_roles(self.maker, ["maker", "checker"])
+        self.assertIn("maker", self.svc.get_user_roles(str(self.maker.id)))
+        self.assertIn("checker", self.svc.get_user_roles(str(self.maker.id)))
+        self.svc.assign_roles(self.maker, ["maker"])
+        self.assertEqual(set(self.svc.get_user_roles(str(self.maker.id))), {"maker"})

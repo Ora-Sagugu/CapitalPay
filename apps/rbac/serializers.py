@@ -85,6 +85,14 @@ class UserRoleAssignSerializer(serializers.Serializer):
     role_codes = serializers.ListField(child=serializers.CharField())
 
 
+class FunctionRoleAssignSerializer(serializers.Serializer):
+    role_codes = serializers.ListField(child=serializers.CharField(), allow_empty=True)
+
+
+class RoleCapabilityAssignSerializer(serializers.Serializer):
+    capability_codes = serializers.ListField(child=serializers.CharField(), allow_empty=True)
+
+
 class OperationLogSerializer(serializers.ModelSerializer):
     class Meta:
         model = OperationLog

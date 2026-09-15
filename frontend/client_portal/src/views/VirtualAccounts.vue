@@ -1,119 +1,122 @@
 <template>
-  <el-card class="page-card" shadow="never">
-    <div class="toolbar">
-      <el-input v-model="filters.search" placeholder="账户号 / 银行" clearable style="width: 220px" @keyup.enter="reload" />
-      <el-select v-model="filters.currency" placeholder="币种" clearable style="width: 120px" @change="reload">
-        <el-option v-for="c in currencies" :key="c" :label="c" :value="c" />
-      </el-select>
-      <el-button type="primary" @click="reload">查询</el-button>
+  <div>
+    <PageHeader title="Virtual Accounts" subtitle="Customer collection VAs linked to a pooled nostro" />
+    <KpiCards :items="kpis" />
+    <div class="page-card">
+      <div class="toolbar">
+        <el-input v-model="filters.search" placeholder="Customer / VA number" clearable style="width: 220px" @keyup.enter="reload" />
+        <el-select v-model="filters.status" placeholder="Status" clearable style="width: 140px" @change="reload">
+          <el-option label="Active" value="ACTIVE" /><el-option label="Inactive" value="INACTIVE" /><el-option label="Revoked" value="REVOKED" />
+        </el-select>
+        <el-button @click="reload">Refresh</el-button>
+      </div>
+      <el-table :data="rows" v-loading="loading">
+        <el-table-column prop="merchant_name" label="Customer" min-width="160" />
+        <el-table-column prop="merchant_no" label="Customer number" min-width="150" />
+        <el-table-column prop="va_count" label="VA count" min-width="100" />
+        <el-table-column label="Currencies" min-width="180">
+          <template #default="{ row }">{{ (row.currencies || []).join(', ') }}</template>
+        </el-table-column>
+        <el-table-column prop="status" label="Status" width="110" />
+        <el-table-column label="Actions" width="100" fixed="right">
+          <template #default="{ row }">
+            <el-button link type="primary" @click="openDetail(row)">Details</el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+      <el-pagination class="toolbar" background layout="total, prev, pager, next" :total="total" :page-size="pageSize" :current-page="page" @current-change="onPage" />
     </div>
-    <el-table :data="rows" v-loading="loading" border stripe>
-      <el-table-column prop="account_no" label="账户号" min-width="160" />
-      <el-table-column prop="bank_name" label="银行" min-width="140" />
-      <el-table-column prop="currency" label="币种" width="90" />
-      <el-table-column prop="balance" label="余额" min-width="120" />
-      <el-table-column prop="max_single_amount" label="单笔限额" min-width="110" />
-      <el-table-column prop="daily_limit" label="日限额" min-width="110" />
-      <el-table-column prop="is_active" label="启用" width="80">
-        <template #default="{ row }">{{ row.is_active === false ? '否' : '是' }}</template>
-      </el-table-column>
-      <el-table-column label="操作" width="200" fixed="right">
-        <template #default="{ row }">
-          <el-button link type="success" @click="recharge(row)">充值</el-button>
-          <el-button link @click="showTx(row)">交易历史</el-button>
-        </template>
-      </el-table-column>
-    </el-table>
-    <el-pagination class="toolbar" background layout="total, prev, pager, next" :total="total" :page-size="pageSize" :current-page="page" @current-change="onPage" />
-
-    <el-dialog v-model="txVisible" title="交易历史" width="720px">
-      <el-table :data="txRows" border stripe max-height="420">
-        <el-table-column prop="type" label="类型" width="120" />
-        <el-table-column prop="amount" label="金额" width="120" />
-        <el-table-column prop="status" label="状态" width="120" />
-        <el-table-column prop="ref_no" label="单号" min-width="160" />
-        <el-table-column prop="created_at" label="时间" min-width="160" />
+    <el-drawer v-model="detailVisible" :title="detailTitle" size="70%">
+      <el-table :data="detailAccounts">
+        <el-table-column prop="va_number" label="VA number" min-width="170" />
+        <el-table-column prop="currency" label="Currency" min-width="100" />
+        <el-table-column prop="balance" label="Balance" min-width="110" :formatter="formatMoneyCell" />
+        <el-table-column prop="status" label="Status" width="110" />
+        <el-table-column prop="master_account_no" label="Master account" min-width="150" />
+        <el-table-column label="Actions" width="140" fixed="right">
+          <template #default="{ row }">
+            <el-button link @click="openTx(row)">Ledger</el-button>
+            <el-button link type="danger" @click="revoke(row)">Revoke</el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+    </el-drawer>
+    <el-dialog v-model="txVisible" title="VA ledger" width="720px">
+      <el-table :data="txns">
+        <el-table-column prop="type" label="Type" />
+        <el-table-column prop="amount" label="Amount" :formatter="formatMoneyCell" />
+        <el-table-column prop="status_label" label="Status" />
+        <el-table-column prop="created_at" label="Date/time" />
       </el-table>
     </el-dialog>
-  </el-card>
+  </div>
 </template>
 
 <script setup>
-import { ref, reactive, onMounted } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
-import { getNostroAccounts, rechargeNostro, getNostroTransactions, getVirtualAccounts } from '@/api/accounts'
+import { computed, onMounted, reactive, ref } from 'vue'
+import { ElMessageBox } from 'element-plus'
+import PageHeader from '@/components/PageHeader.vue'
+import KpiCards from '@/components/KpiCards.vue'
+import { getVirtualAccountsByCustomer, getVirtualAccountStats, getVaTransactions, revokeVa } from '@/api/accounts'
+import { unwrapList, formatMoneyCell } from '@/utils/format'
 
-const currencies = ['USD', 'EUR', 'GBP', 'CNY', 'JPY', 'HKD']
 const rows = ref([])
+const stats = ref({})
 const total = ref(0)
 const page = ref(1)
-const pageSize = ref(20)
+const pageSize = 20
 const loading = ref(false)
-const filters = reactive({ search: '', currency: '' })
+const filters = reactive({ search: '', status: '' })
+const detailVisible = ref(false)
+const detail = ref(null)
 const txVisible = ref(false)
-const txRows = ref([])
+const txns = ref([])
+const kpis = computed(() => [
+  { label: 'All', value: stats.value.total ?? 0 },
+  { label: 'Active', value: stats.value.active ?? 0 },
+  { label: 'Inactive', value: stats.value.inactive ?? 0 },
+  { label: 'Revoked', value: stats.value.revoked ?? 0 }
+])
+const detailTitle = computed(() => {
+  if (!detail.value) return 'Virtual Accounts'
+  return `${detail.value.merchant_name || detail.value.merchant_no} virtual accounts`
+})
+const detailAccounts = computed(() => detail.value?.accounts || [])
 
 async function load() {
   loading.value = true
   try {
-    // 优先多币种 Nostro；若无数据再展示 VA
-    const data = await getNostroAccounts({
+    stats.value = await getVirtualAccountStats()
+    const data = await getVirtualAccountsByCustomer({
       page: page.value,
-      page_size: pageSize.value,
+      page_size: pageSize,
       search: filters.search || undefined,
-      currency: filters.currency || undefined
+      status: filters.status || undefined
     })
-    let list = data.results || []
-    if (!list.length && page.value === 1) {
-      const va = await getVirtualAccounts({ page: 1, page_size: pageSize.value, search: filters.search || undefined })
-      list = (va.results || []).map((v) => ({
-        id: v.id,
-        account_no: v.va_number || v.account_no,
-        bank_name: v.bank_name,
-        currency: v.currency,
-        balance: v.balance,
-        is_active: v.status !== 'INACTIVE',
-        _isVa: true
-      }))
-      total.value = va.count || 0
-    } else {
-      total.value = data.count || 0
+    const u = unwrapList(data)
+    rows.value = u.rows
+    total.value = u.total
+    if (detail.value) {
+      const next = rows.value.find((row) => row.merchant === detail.value.merchant)
+      if (next) detail.value = next
     }
-    rows.value = list
-  } finally {
-    loading.value = false
-  }
+  } finally { loading.value = false }
 }
-function reload() {
-  page.value = 1
-  load()
+function reload() { page.value = 1; load() }
+function onPage(p) { page.value = p; load() }
+function openDetail(row) {
+  detail.value = row
+  detailVisible.value = true
 }
-function onPage(p) {
-  page.value = p
-  load()
-}
-async function recharge(row) {
-  if (row._isVa) {
-    ElMessage.info('请在 Nostro 账户上充值')
-    return
-  }
-  const { value } = await ElMessageBox.prompt('充值金额', '账户充值', { inputPattern: /.+/ })
-  await rechargeNostro(row.id, { amount: value })
-  ElMessage.success('充值成功')
-  load()
-}
-async function showTx(row) {
-  if (row._isVa) {
-    ElMessage.info('VA 交易请查看母账户流水')
-    return
-  }
-  const data = await getNostroTransactions(row.id)
-  txRows.value = data.transactions || []
+async function openTx(row) {
+  const data = await getVaTransactions(row.id)
+  txns.value = data.transactions || []
   txVisible.value = true
+}
+async function revoke(row) {
+  const { value } = await ElMessageBox.prompt('Revocation reason', 'Revoke virtual account', { inputPattern: /.+/, inputErrorMessage: 'A reason is required.' })
+  await revokeVa(row.id, { reason: value })
+  load()
 }
 onMounted(load)
 </script>
-
-<style scoped>
-.toolbar { margin-bottom: 16px; display: flex; gap: 8px; }
-</style>

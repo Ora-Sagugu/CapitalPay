@@ -27,6 +27,7 @@ from django.core.management.base import BaseCommand
 from django.db import transaction
 
 from apps.compliance.models import SanctionList, SanctionHitDetail
+from apps.compliance.country_names import guess_country_from_text, normalize_country_display
 
 
 # ═══════════════════════════════════════════════════════════
@@ -78,10 +79,10 @@ UN_ENT_FIELDS = [
 #  OFAC entityType → 内部映射
 # ═══════════════════════════════════════════════════════════
 OFAC_TYPE_MAP = {
-    "Individual": "PERSON",
-    "Entity": "COMPANY",
-    "Vessel": "VESSEL",
-    "Aircraft": "OTHER",
+    "Individual": "INDIVIDUAL",
+    "Entity": "ORGANIZATION",
+    "Vessel": "ENTITY",
+    "Aircraft": "ENTITY",
 }
 
 
@@ -193,14 +194,14 @@ class Command(BaseCommand):
         # 表格1: 个人
         if len(tables) >= 1:
             self.stdout.write("\n  解析个人记录...")
-            ind_records = self._parse_un_table(tables[0], "PERSON")
+            ind_records = self._parse_un_table(tables[0], "INDIVIDUAL")
             self.stdout.write(f"    个人: {len(ind_records)} 条")
             all_records.extend(ind_records)
 
         # 表格2: 实体
         if len(tables) >= 2:
             self.stdout.write("\n  解析实体记录...")
-            ent_records = self._parse_un_table(tables[1], "COMPANY")
+            ent_records = self._parse_un_table(tables[1], "ORGANIZATION")
             self.stdout.write(f"    实体: {len(ent_records)} 条")
             all_records.extend(ent_records)
 
@@ -229,7 +230,7 @@ class Command(BaseCommand):
             if not td:
                 continue
             text = td.get_text(" ", strip=True)
-            if entity_type == "PERSON":
+            if entity_type == "INDIVIDUAL":
                 rec = self._parse_un_individual(text)
             else:
                 rec = self._parse_un_entity(text)
@@ -283,11 +284,11 @@ class Command(BaseCommand):
 
         return SanctionList(
             list_type="UN",
-            entity_type="PERSON",
+            entity_type="INDIVIDUAL",
             entity_name=full_name or ref_id,
             reference_id=ref_id,
             alias_names=aliases[:500],
-            country=country,
+            country=normalize_country_display(country),
             nationality=nationality,
             date_of_birth=dob,
             place_of_birth=self._clean_val(fields.get("POB", "")),
@@ -322,11 +323,11 @@ class Command(BaseCommand):
 
         return SanctionList(
             list_type="UN",
-            entity_type="COMPANY",
+            entity_type="ORGANIZATION",
             entity_name=entity_name or ref_id,
             reference_id=ref_id,
             alias_names=aliases[:500],
-            country=COMMITTEE_MAP.get(prefix, {}).get("country", ""),
+            country=normalize_country_display(COMMITTEE_MAP.get(prefix, {}).get("country", "")),
             nationality="",
             date_of_birth="",
             place_of_birth="",
@@ -398,35 +399,7 @@ class Command(BaseCommand):
         return "" if value.lower() == "na" else value
 
     def _guess_country(self, nationality: str) -> str:
-        keywords = {
-            "Afghanistan": "阿富汗", "Democratic Republic of the Congo": "刚果民主共和国",
-            "Congo": "刚果民主共和国", "DPRK": "朝鲜", "Korea": "朝鲜",
-            "Iraq": "伊拉克", "Iran": "伊朗", "Libya": "利比亚",
-            "Somalia": "索马里", "Central African Republic": "中非共和国",
-            "Sudan": "苏丹", "Haiti": "海地", "Yemen": "也门",
-            "Guinea-Bissau": "几内亚比绍", "South Sudan": "南苏丹",
-            "Russia": "俄罗斯联邦", "Syria": "阿拉伯叙利亚共和国",
-            "Syrian": "阿拉伯叙利亚共和国", "Pakistan": "巴基斯坦",
-            "Saudi Arabia": "沙特阿拉伯", "Nigeria": "尼日利亚",
-            "Mali": "马里", "France": "法国", "United Kingdom": "英国",
-            "Germany": "德国", "Italy": "意大利", "Colombia": "哥伦比亚",
-            "China": "中国", "Japan": "日本", "Lebanon": "黎巴嫩",
-            "Egypt": "埃及", "Morocco": "摩洛哥", "Tunisia": "突尼斯",
-            "Qatar": "卡塔尔", "Kuwait": "科威特", "Turkey": "土耳其",
-            "India": "印度", "Indonesia": "印度尼西亚",
-            "Malaysia": "马来西亚", "Philippines": "菲律宾",
-            "Thailand": "泰国", "Kenya": "肯尼亚", "South Africa": "南非",
-            "Belgium": "比利时", "Netherlands": "荷兰", "Switzerland": "瑞士",
-            "Austria": "奥地利", "Sweden": "瑞典", "Spain": "西班牙",
-            "Greece": "希腊", "Ukraine": "乌克兰", "Belarus": "白俄罗斯",
-            "Australia": "澳大利亚", "Canada": "加拿大",
-            "United Arab Emirates": "阿拉伯联合酋长国", "UAE": "阿拉伯联合酋长国",
-        }
-        nat_lower = nationality.lower()
-        for kw, cn in keywords.items():
-            if kw.lower() in nat_lower:
-                return cn
-        return nationality  # fallback 返回原文
+        return guess_country_from_text(nationality)
 
     def _parse_date_str(self, date_str: str) -> Optional[Any]:
         if not date_str or date_str == "na":
@@ -463,7 +436,7 @@ class Command(BaseCommand):
 
     def _print_un_summary(self, records: List[SanctionList]):
         by_committee: Dict[str, int] = {}
-        by_type: Dict[str, int] = {"PERSON": 0, "COMPANY": 0}
+        by_type: Dict[str, int] = {"INDIVIDUAL": 0, "ORGANIZATION": 0}
         for r in records:
             ref = r.reference_id or ""
             prefix = ref[:ref.rindex('.')] if '.' in ref else "??"
@@ -474,8 +447,8 @@ class Command(BaseCommand):
         for k, v in sorted(by_committee.items(), key=lambda x: -x[1]):
             info = COMMITTEE_MAP.get(k, {"program": k})
             self.stdout.write(f"    {k} ({info['program']}): {v} 条")
-        self.stdout.write(f"\n  按类型: 个人={by_type.get('PERSON', 0)}, "
-                          f"实体={by_type.get('COMPANY', 0)}")
+        self.stdout.write(f"\n  按类型: 个人={by_type.get('INDIVIDUAL', 0)}, "
+                          f"实体={by_type.get('ORGANIZATION', 0)}")
 
     # ═════════════════════════════════════════════════════════
     #  OFAC Enhanced XML 导入 (流式解析)
@@ -577,7 +550,7 @@ class Command(BaseCommand):
             et = general_info.find(f"{ns}entityType")
             if et is not None:
                 entity_type_raw = et.text or ""
-        entity_type = OFAC_TYPE_MAP.get(entity_type_raw, "OTHER")
+        entity_type = OFAC_TYPE_MAP.get(entity_type_raw, "ENTITY")
 
         # ── 制裁项目 ──
         programs = []
@@ -624,7 +597,7 @@ class Command(BaseCommand):
                 if is_primary:
                     primary_name = full_name
                     # title (仅个人)
-                    if entity_type == "PERSON":
+                    if entity_type == "INDIVIDUAL":
                         title = general_info.findtext(f"{ns}title", "").strip() if general_info else ""
                 elif full_name:
                     aliases.append(full_name)
@@ -693,7 +666,7 @@ class Command(BaseCommand):
             date_of_birth=dob,
             place_of_birth="",
             address=address,
-            country=country,
+            country=normalize_country_display(country),
             sanction_reason=reason[:500],
             effective_date=effective_date,
             review_date=self._calc_review_date(risk),
@@ -714,7 +687,13 @@ class Command(BaseCommand):
                     by_prog[p] = by_prog.get(p, 0) + 1
 
         self.stdout.write("\n  按类型分布:")
-        type_map = {"PERSON": "个人", "COMPANY": "企业", "VESSEL": "船只", "OTHER": "其他"}
+        type_map = {
+            "INDIVIDUAL": "Individual",
+            "ENTITY": "Entity",
+            "ORGANIZATION": "Organization",
+            "COUNTRY": "Country",
+            "REGION": "Region",
+        }
         for t, c in sorted(by_type.items(), key=lambda x: -x[1]):
             self.stdout.write(f"    {type_map.get(t, t)}: {c:,}")
         self.stdout.write("\n  按制裁项目 (Top 10):")
@@ -731,8 +710,7 @@ class Command(BaseCommand):
         self.stdout.write(self.style.MIGRATE_HEADING(
             f"\n{'━' * 60}\n  导入结果汇总\n{'━' * 60}"
         ))
-        for lt, label in [("UN", "联合国"), ("OFAC", "美国OFAC"), ("EU", "欧盟"),
-                           ("MPS", "公安部"), ("PBOC", "人民银行"), ("INTERNAL", "内部")]:
+        for lt, label in [("UN", "联合国"), ("OFAC", "美国OFAC")]:
             count = SanctionList.objects.filter(list_type=lt, is_active=True).count()
             if count:
                 high = SanctionList.objects.filter(

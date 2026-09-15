@@ -28,9 +28,9 @@ class MerchantModelTest(TestCase):
         """__str__ 应返回 商户名(商户编号)。"""
         self.assertEqual(str(self.merchant), "测试商户有限公司(TEST_M001)")
 
-    def test_default_status_is_active(self):
-        """新商户默认状态为 ACTIVE。"""
-        self.assertEqual(self.merchant.status, Merchant.Status.ACTIVE)
+    def test_default_status_is_pending(self):
+        """新商户默认状态为 PENDING，必须完成第二级审核。"""
+        self.assertEqual(self.merchant.status, Merchant.Status.PENDING)
 
     def test_default_is_deleted_false(self):
         """新商户默认未删除。"""
@@ -55,6 +55,7 @@ class MerchantServiceTest(TestCase):
             merchant_name="服务测试商户",
             api_key="ak_svc_001",
             api_secret="sk_svc_secret",
+            status=Merchant.Status.ACTIVE,
         )
 
     # ── 查询 ──────────────────────────────────────────────
@@ -147,7 +148,7 @@ class MerchantServiceTest(TestCase):
         })
         # 正常计算: 100000 * 0.003 = 300
         result = self.service.calculate_fee(self.merchant, Decimal("100000.00"), "WIRE_TRANSFER")
-        self.assertEqual(result["fee_amount"], Decimal("300.000"))
+        self.assertEqual(result["fee_amount"], Decimal("300.00"))
         self.assertEqual(result["settle_amount"], Decimal("99700.00"))
 
     def test_calculate_fee_min_fee_applied(self):

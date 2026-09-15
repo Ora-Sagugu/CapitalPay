@@ -8,9 +8,9 @@ from apps.core.models import BaseModel
 
 
 class SystemUser(BaseModel):
-    """运营后台用户 — B2B 支付平台内部运营人员账号。
+    """运营后台用户 — CapitalPay 内部运营人员账号。
 
-    角色包括: 超级管理员、运营、财务、审计、商户管理员等。
+    角色包括: Super Admin、Maker、Checker、Authoriser。
     """
     username = models.CharField(max_length=64, unique=True, verbose_name="用户名")
     password_hash = models.CharField(max_length=256, verbose_name="密码哈希")
@@ -56,20 +56,23 @@ class Role(BaseModel):
 
 
 class Permission(BaseModel):
-    """权限 — 最小授权单元，格式: resource:action。
-
-    例如: payment:view, payment:create, merchant:approve, report:export
-    """
+    """权限 — 最小授权单元。格式: feature:<page> 或 feature:<page>.approve。"""
 
     class ResourceGroup(models.TextChoices):
+        DASHBOARD = "dashboard", "Overview"
+        REPORT = "report", "Reports"
+        CUSTOMER = "customer", "Customers"
+        REMITTANCE = "remittance", "Remittance"
+        AGENT = "agent", "Agents"
+        BANK = "bank", "Banking"
+        SANCTION = "sanction", "Sanctions"
+        SYSTEM = "system", "System"
         MERCHANT = "merchant", "商户管理"
         PAYMENT = "payment", "支付管理"
         REFUND = "refund", "退款管理"
         ACCOUNT = "account", "账户管理"
         RECONCILIATION = "reconciliation", "对账管理"
         SETTLEMENT = "settlement", "清算管理"
-        REPORT = "report", "报表查询"
-        SYSTEM = "system", "系统管理"
 
     code = models.CharField(max_length=128, unique=True, verbose_name="权限编码")
     name = models.CharField(max_length=128, verbose_name="权限名称")

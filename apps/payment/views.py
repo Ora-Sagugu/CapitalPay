@@ -2,26 +2,48 @@
 from decimal import Decimal, InvalidOperation  # noqa: E402
 from rest_framework import viewsets, status, serializers
 from rest_framework.decorators import action
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework.filters import SearchFilter, OrderingFilter
+from django.db import transaction
 
 from apps.core.exceptions import BusinessException, ErrorCode
-from apps.rbac.permissions import require_permission
+from apps.rbac.permissions import RequiresFeature
+from apps.openapi.authentication import HMACAuthentication, HasHMACPrincipal
+from apps.rbac.authentication import JWTAuthentication
 from .models import PaymentOrder, RefundOrder, RefundFeeConfig
 from .serializers import (
-    PaymentOrderSerializer, PaymentOrderListSerializer,
+    PaymentOrderSerializer, PaymentOrderListSerializer, PaymentOrderDetailSerializer,
     RefundOrderSerializer, RefundRequestSerializer, RefundReviewSerializer,
-    RemittanceApplySerializer,
+    RemittanceQuoteRequestSerializer, RemittanceSubmitSerializer,
 )
 from .services.pre_order import PreOrderService
 from .services.payment import PaymentConfirmService
 from .services.refund import RefundService
 from .services.close_order import CloseOrderService
+from .services.remittance_application import RemittanceApplicationService
+from .services.remittance_quote import RemittanceQuoteService
 
 
-class PaymentOrderViewSet(viewsets.ReadOnlyModelViewSet):
+class PaymentOrderViewSet(RequiresFeature, viewsets.ReadOnlyModelViewSet):
     """支付订单查询 ViewSet — 运营管理端。"""
+    authentication_classes = [JWTAuthentication]
+    permission_classes = [IsAuthenticated]
+    feature_code = "feature:orders"
+    ACTION_FEATURES = {
+        "trace_fund": "feature:fund_trace",
+        "preorder_list": "feature:pre_orders",
+        "preorder_stats": "feature:pre_orders",
+        "review_remittance": "feature:orders.approve",
+        "execute_remittance": "feature:orders.approve",
+        "confirm_transfer": "feature:orders.approve",
+        "confirm_payment": "feature:orders.approve",
+        "payout_banks": "feature:orders.approve",
+        "close_order": "feature:orders.approve",
+        "manual_confirm": "feature:orders.approve",
+        "refund_initiate": "feature:orders.approve",
+    }
     queryset = PaymentOrder.objects.filter(is_deleted=False).select_related("merchant")
     serializer_class = PaymentOrderSerializer
     lookup_field = "order_no"
@@ -32,9 +54,23 @@ class PaymentOrderViewSet(viewsets.ReadOnlyModelViewSet):
                      "beneficiary_name", "merchant__merchant_name", "merchant__merchant_no"]
     ordering_fields = ["created_at", "amount", "status"]
 
+    def get_queryset(self):
+        qs = super().get_queryset()
+        if getattr(self, "action", None) == "retrieve":
+            return qs.select_related("merchant", "quote").prefetch_related("refunds")
+        if getattr(self, "action", None) == "sanction_review":
+            return qs.select_related("merchant")
+        if getattr(self, "action", None) == "list":
+            status_filter = (self.request.query_params.get("status") or "").strip()
+            if status_filter != PaymentOrder.OrderStatus.PENDING_AGENT_REVIEW:
+                qs = qs.exclude(status=PaymentOrder.OrderStatus.PENDING_AGENT_REVIEW)
+        return qs
+
     def get_serializer_class(self):
         if self.action == "list":
             return PaymentOrderListSerializer
+        if self.action == "retrieve":
+            return PaymentOrderDetailSerializer
         return PaymentOrderSerializer
 
     # ── 关单 ──
@@ -46,6 +82,22 @@ class PaymentOrderViewSet(viewsets.ReadOnlyModelViewSet):
         service = CloseOrderService()
         service.close_order(order, reason)
         return Response({"message": "Order closed"})
+
+    @action(detail=True, methods=["post"], url_path="notify-retry")
+    def notify_retry(self, request, order_no=None):
+        order = self.get_object()
+        from apps.payment.services.notify import trigger_order_notify
+        trigger_order_notify(order)
+        order.refresh_from_db()
+        return Response({"message": "Notification triggered", "notify_status": order.notify_status})
+
+    @action(detail=True, methods=["post"], url_path="manual-confirm")
+    def manual_confirm(self, request, order_no=None):
+        order = self.get_object()
+        service = PaymentConfirmService()
+        service.manual_confirm(str(order.id), bank_txn_id=request.data.get("bank_txn_id"))
+        order.refresh_from_db()
+        return Response({"message": "Collection has been confirmed", "status": order.status})
 
     # ── 统计 ──
 
@@ -64,8 +116,8 @@ class PaymentOrderViewSet(viewsets.ReadOnlyModelViewSet):
 
         return Response({
             "pending_review": qs.filter(status="PENDING_REVIEW").count(),
-            "pending_pay": qs.filter(status="PENDING_PAY").count(),
-            "completed_count": qs.filter(status="COMPLETED").count(),
+            "pending_pay": qs.filter(status__in=["PENDING_PAY", "PRE_CREATE", "PROCESSING"]).count(),
+            "completed_count": qs.filter(status__in=["SETTLED", "COMPLETED"]).count(),
             "today_count": today_qs.count(),
             "today_amount": float(today_qs.aggregate(total=Sum("amount"))["total"] or 0),
             "total_count": qs.count(),
@@ -73,135 +125,34 @@ class PaymentOrderViewSet(viewsets.ReadOnlyModelViewSet):
 
     # ── 资金追踪 ──
 
-    STEP_KEYS = ["created", "review", "collect", "route", "clear", "credit"]
-
-    STATUS_STEP = {
-        "PRE_CREATE": "created",
-        "PENDING_REVIEW": "review",
-        "PROCESSING": "collect",
-        "PENDING_PAY": "route",
-        "PAY_RECEIVED": "clear",
-        "PENDING_SETTLE": "clear",
-        "SETTLED": "credit",
-        "COMPLETED": "credit",
-        "CLOSED": None,
-        "REFUNDING": None,
-        "REFUNDED": None,
-    }
-
     @action(detail=False, methods=["get"], url_path="trace-fund")
     def trace_fund(self, request):
-        """资金追踪 — 查询汇款当前所处阶段与详情。
+        """资金追踪 — 查询汇款资金去向与收款 VA。
 
-        支持按平台订单号(RMT...)、商户订单号、PRN、收款人姓名、汇款人姓名检索。
-        按汇款人搜索命中多笔时返回 pending_orders 列表；单笔命中返回完整追踪数据。
+        统一参数 q：平台订单号 / 商户订单号 / PRN / 收款人 / 汇款人（商户名），OR 检索。
+        兼容旧字段 order_no、merchant_order_no、prn、beneficiary_name、remitter_name。
+        selected_order_no 指定展开哪一笔；缺省为命中集中最新一条。
         """
-        order_no = request.query_params.get("order_no", "").strip()
-        merchant_order_no = request.query_params.get("merchant_order_no", "").strip()
-        prn = request.query_params.get("prn", "").strip()
-        beneficiary_name = request.query_params.get("beneficiary_name", "").strip()
-        remitter_name = request.query_params.get("remitter_name", "").strip()
+        from apps.payment.services.fund_trace import FundTraceNotFound, trace_fund
 
-        qs = PaymentOrder.objects.filter(is_deleted=False).select_related(
-            "merchant"
-        ).order_by("-created_at")
-
-        if order_no:
-            qs = qs.filter(order_no__icontains=order_no)
-        if merchant_order_no:
-            qs = qs.filter(merchant_order_no__icontains=merchant_order_no)
-        if prn:
-            qs = qs.filter(prn_code__icontains=prn)
-        if beneficiary_name:
-            qs = qs.filter(beneficiary_name__icontains=beneficiary_name)
-        if remitter_name:
-            qs = qs.filter(merchant__merchant_name__icontains=remitter_name)
-
-        if not qs.exists():
-            raise serializers.ValidationError({"detail": "No matching orders found."})
-
-        # If searching by remitter and multiple results, return list
-        if remitter_name and qs.count() > 1:
-            return Response({
-                "pending_orders": [
-                    {
-                        "order_no": o.order_no,
-                        "merchant_order_no": o.merchant_order_no,
-                        "beneficiary_name": o.beneficiary_name,
-                        "amount": str(o.amount),
-                        "from_currency": o.from_currency,
-                        "status": o.status,
-                        "created_at": o.created_at.strftime("%Y-%m-%d %H:%M:%S") if o.created_at else "",
-                    }
-                    for o in qs[:50]
-                ]
-            })
-
-        order = qs.first()
-
-        # Determine current step
-        current_step = self.STATUS_STEP.get(order.status)
-        step_idx = (
-            self.STEP_KEYS.index(current_step)
-            if current_step in self.STEP_KEYS
-            else -1
-        )
-
-        completed_steps = self.STEP_KEYS[: step_idx + 1] if step_idx >= 0 else []
-        all_done = order.status in ("COMPLETED", "REFUNDED")
-        terminal = order.status in ("COMPLETED", "CLOSED", "REFUNDED")
-
-        result = {
-            "order_no": order.order_no,
-            "merchant_order_no": order.merchant_order_no or "",
-            "remitter_name": (order.merchant.merchant_name if order.merchant else "") or "",
-            "from_currency": order.from_currency,
-            "to_currency": order.to_currency,
-            "amount": str(order.amount),
-            "fee_bearing": order.fee_bearing or "",
-            "status": order.status,
-            "created_at": order.created_at.strftime("%Y-%m-%d %H:%M:%S") if order.created_at else "",
-            "updated_at": order.updated_at.strftime("%Y-%m-%d %H:%M:%S") if order.updated_at else "",
-            "current_step": current_step,
-            "step_index": step_idx,
-            "completed_steps": completed_steps,
-            "all_done": all_done,
-            "terminal": terminal,
-            "beneficiary_name": order.beneficiary_name or "",
-            "beneficiary_account": order.beneficiary_account or "",
-            "beneficiary_bank": order.beneficiary_bank or "",
-            "beneficiary_swift": order.beneficiary_swift or "",
-            "beneficiary_address": order.beneficiary_address or "",
-            "prn": order.prn_code or "",
-        }
-
-        # Virtual Account (collection VA)
-        va = getattr(order, "virtual_account", None)
-        if va:
-            result["virtual_account"] = {
-                "account_no": getattr(va, "account_no", ""),
-                "bank_name": getattr(va, "bank_name", ""),
-                "balance": str(getattr(va, "balance", 0)),
-                "currency": getattr(va, "currency", order.from_currency),
-                "is_active": getattr(va, "is_active", True),
-            }
-
-        # Nostro / master account
-        nostro = getattr(order, "nostro_account", None)
-        if nostro:
-            result["nostro_account"] = {
-                "account_no": getattr(nostro, "account_no", ""),
-                "bank_name": getattr(nostro, "bank_name", ""),
-                "balance": str(getattr(nostro, "balance", 0)),
-                "currency": getattr(nostro, "currency", order.to_currency),
-            }
-
+        try:
+            result = trace_fund(
+                q=request.query_params.get("q", ""),
+                order_no=request.query_params.get("order_no", ""),
+                merchant_order_no=request.query_params.get("merchant_order_no", ""),
+                prn=request.query_params.get("prn", ""),
+                beneficiary_name=request.query_params.get("beneficiary_name", ""),
+                remitter_name=request.query_params.get("remitter_name", ""),
+                selected_order_no=request.query_params.get("selected_order_no", ""),
+            )
+        except FundTraceNotFound as exc:
+            raise serializers.ValidationError({"detail": str(exc)})
         return Response(result)
 
     # ── 汇款审核 ──
 
     @action(detail=True, methods=["post"], url_path="review")
-    @require_permission("payment:create")
+    @transaction.atomic
     def review_remittance(self, request, order_no=None):
         """审核汇款 — approve/reject。
 
@@ -209,7 +160,9 @@ class PaymentOrderViewSet(viewsets.ReadOnlyModelViewSet):
             PENDING_REVIEW → approve → PENDING_PAY（待付款，此时可申请退款）
             PENDING_REVIEW → reject → CLOSED（需填写驳回原因）
         """
-        order = self.get_object()
+        order = PaymentOrder.objects.select_for_update().select_related(
+            "merchant", "merchant__agent"
+        ).get(pk=self.get_object().pk)
         action_type = request.data.get("action")
         if action_type not in ("approve", "reject"):
             return Response(
@@ -235,22 +188,29 @@ class PaymentOrderViewSet(viewsets.ReadOnlyModelViewSet):
             order.status = "CLOSED"
             order.review_comment = reason
             order.closed_at = now
-            order.reviewed_by = request.data.get("reviewed_by", "")
+            order.reviewed_by = getattr(request.user, "username", "") or str(request.user.pk)
             order.reviewed_at = now
             order.add_status_history("CLOSED", {"reason": reason})
             order.save(update_fields=[
                 "status", "reviewed_by", "reviewed_at", "review_comment",
                 "closed_at", "updated_at", "status_history",
             ])
+            RemittanceApplicationService().release_reserved_usage(order)
             return Response({
                 "message": "Remittance rejected",
                 "status": order.status,
             })
 
         # ── approve: PENDING_REVIEW → PENDING_PAY（待付款，此时可申请退款） ──
+        from apps.payment.services.remittance_policy import RemittanceEligibilityPolicy
+        RemittanceEligibilityPolicy().assert_eligible(
+            order.merchant, order.amount, include_usage=False
+        )
         order.status = "PENDING_PAY"
-        order.prn_code = self._generate_prn_code()
-        order.reviewed_by = request.data.get("reviewed_by", "")
+        from apps.payment.services.prn_service import bind_prn_to_order
+        requested = (request.data.get("prn_code") or order.prn_code or "").strip()
+        order.prn_code = bind_prn_to_order(order, requested)
+        order.reviewed_by = getattr(request.user, "username", "") or str(request.user.pk)
         order.reviewed_at = now
         order.review_comment = "Approved"
         order.add_status_history("PENDING_PAY", {
@@ -269,11 +229,10 @@ class PaymentOrderViewSet(viewsets.ReadOnlyModelViewSet):
             "prn_code": order.prn_code,
         })
 
-    def _generate_prn_code(self):
-        """生成 PRN 码（使用可配置规则，审核通过时调用）."""
-        from apps.payment.models import PRNConfig
+    def _generate_prn_code(self, order=None):
+        """生成 PRN 码（审核通过时调用）."""
         from apps.payment.services.prn_service import generate_prn
-        return generate_prn(PRNConfig.get_config())
+        return generate_prn(order=order)
 
     # ── 执行汇款（审核+完成，一步到位） ──
 
@@ -292,7 +251,6 @@ class PaymentOrderViewSet(viewsets.ReadOnlyModelViewSet):
     # ── 确认支付 ──
 
     @action(detail=True, methods=["post"], url_path="confirm-payment")
-    @require_permission("payment:create")
     def confirm_payment(self, request, order_no=None):
         """确认支付 — PENDING_PAY → PAY_RECEIVED，并确保分润记录存在。"""
         order = self.get_object()
@@ -302,19 +260,15 @@ class PaymentOrderViewSet(viewsets.ReadOnlyModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        from django.utils import timezone
-        order.status = "PAY_RECEIVED"
-        order.pay_received_at = timezone.now()
-        order.bank_txn_id = request.data.get("bank_txn_id", "")
-        order.add_status_history("PAY_RECEIVED")
-        order.save(update_fields=["status", "pay_received_at", "bank_txn_id", "updated_at", "status_history"])
-
-        # ── 确保分润记录存在（提交时可能因异常而漏建） ──
-        fee_share_created = self._ensure_fee_share(order)
-
+        from apps.payment.services.payment import PaymentConfirmService
+        confirmed = PaymentConfirmService().manual_confirm_by_order_no(
+            order.order_no,
+            bank_txn_id=request.data.get("bank_txn_id", "") or "",
+        )
+        fee_share_created = self._ensure_fee_share(confirmed)
         return Response({
             "message": "Payment confirmed",
-            "status": order.status,
+            "status": confirmed.status,
             "fee_share_created": fee_share_created,
         })
 
@@ -338,40 +292,26 @@ class PaymentOrderViewSet(viewsets.ReadOnlyModelViewSet):
     # ── 汇款申请 ──
 
     @action(detail=False, methods=["post"], url_path="apply")
-    @require_permission("payment:create")
     def apply_remittance(self, request):
-        """提交汇款申请。
-
-        提交时强制进行制裁预检。仅当收款人名称**精确/别名**命中 HIGH 风险
-        制裁名单时才拦截提交（高置信度），避免操作员跳过前端预检直接提交受
-        制裁方汇款；模糊名称/地址/国家等弱信号仅作建议，不自动拦截，以免误伤
-        常见姓名或位于制裁国但合法的交易。
-        """
-        serializer = RemittanceApplySerializer(data=request.data)
+        """使用有效报价原子提交汇款申请。"""
+        serializer = RemittanceSubmitSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-
-        beneficiary_name = serializer.validated_data.get("beneficiary_name", "") or ""
-        beneficiary_address = serializer.validated_data.get("beneficiary_address", "") or ""
-
-        from apps.compliance.services import scan_entity_lightweight
-        scan = scan_entity_lightweight(beneficiary_name, beneficiary_address)
-        for hit in scan.get("name_hits", []):
-            if (
-                hit.get("risk_level") == "HIGH"
-                and hit.get("match_type") in ("exact_name", "alias_name")
-            ):
-                return Response(
-                    {
-                        "detail": (
-                            "Submission blocked: the beneficiary name exactly matches a "
-                            "HIGH-risk sanctioned entity. Please review before proceeding."
-                        )
-                    },
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-
-        order = serializer.save()
-        return Response(PaymentOrderSerializer(order).data, status=status.HTTP_201_CREATED)
+        from .models import RemittanceQuote
+        quote = RemittanceQuote.objects.filter(
+            quote_no=serializer.validated_data["quote_id"], is_deleted=False
+        ).select_related("merchant").first()
+        if not quote:
+            raise BusinessException("QUOTE_NOT_FOUND", "The quotation does not exist; please obtain a new quotation", 404)
+        order, created = RemittanceApplicationService().submit(
+            merchant=quote.merchant,
+            payload=serializer.validated_data,
+            idempotency_key=request.headers.get("Idempotency-Key", ""),
+            actor_type="ADMIN",
+        )
+        return Response(
+            PaymentOrderSerializer(order).data,
+            status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
+        )
 
     # ── 制裁预检 ──
 
@@ -398,46 +338,95 @@ class PaymentOrderViewSet(viewsets.ReadOnlyModelViewSet):
 
         from apps.compliance.services import scan_entity_lightweight
         result = scan_entity_lightweight(beneficiary_name, beneficiary_address)
+        blocked = any(
+            hit.get("risk_level") == "HIGH"
+            and hit.get("match_type") in ("exact_name", "alias_name")
+            for hit in result["name_hits"]
+        )
 
         return Response({
             "is_clear": result["is_clear"],
+            "blocked": blocked,
             "name_hits": result["name_hits"],
             "address_hits": result["address_hits"],
+            "country_hits": result.get("country_hits", []),
             "total_hits": result["total_hits"],
-            "warning_message": "" if result["is_clear"] else self._build_warning(result["name_hits"], result["address_hits"]),
+            "warning_message": "" if result["is_clear"] else self._build_warning(
+                result["name_hits"], result["address_hits"], result.get("country_hits", [])
+            ),
+        })
+
+    @action(detail=True, methods=["get"], url_path="sanction-review")
+    def sanction_review(self, request, order_no=None):
+        """只读：按订单收款人信息比对当前制裁名单，不写扫描记录。
+
+        GET /api/v1/admin/orders/{order_no}/sanction-review/
+        """
+        order = self.get_object()
+        from apps.compliance.services import scan_entity_lightweight
+
+        result = scan_entity_lightweight(
+            order.beneficiary_name or "",
+            order.beneficiary_address or "",
+        )
+        blocked = any(
+            hit.get("risk_level") == "HIGH"
+            and hit.get("match_type") in ("exact_name", "alias_name")
+            for hit in result["name_hits"]
+        )
+        merchant = getattr(order, "merchant", None)
+        return Response({
+            "order_no": order.order_no,
+            "is_clear": result["is_clear"],
+            "blocked": blocked,
+            "total_hits": result["total_hits"],
+            "warning_message": "" if result["is_clear"] else self._build_warning(
+                result["name_hits"], result["address_hits"], result.get("country_hits", [])
+            ),
+            "screened": {
+                "beneficiary_name": order.beneficiary_name or "",
+                "beneficiary_address": order.beneficiary_address or "",
+                "customer_name": merchant.merchant_name if merchant else "",
+                "customer_sanction_status": getattr(merchant, "sanction_status", "") or "",
+            },
+            "name_hits": result["name_hits"],
+            "address_hits": result["address_hits"],
+            "country_hits": result.get("country_hits", []),
         })
 
     @staticmethod
-    def _build_warning(name_hits: list, address_hits: list) -> str:
-        """构建制裁警告信息"""
-        parts = []
-        if name_hits:
-            high_names = [h["entity_name"] for h in name_hits if h["risk_level"] == "HIGH"]
-            if high_names:
-                parts.append("Beneficiary name matches high-risk sanction list: " + ", ".join(high_names[:3]))
-            else:
-                parts.append("Beneficiary name similar to sanction list: " + ", ".join(h["entity_name"] for h in name_hits[:3]))
-            if len(name_hits) > 3:
-                parts[-1] += f" ({len(name_hits)} total)"
-        if address_hits:
-            high_addrs = [h for h in address_hits if h["risk_level"] == "HIGH"]
-            if high_addrs:
-                parts.append("Beneficiary address matches high-risk sanctioned region: " + ", ".join(h["keyword"] for h in high_addrs[:2]))
-            else:
-                parts.append("Beneficiary address matches sanction list: " + ", ".join(h["keyword"] for h in address_hits[:2]))
-        return "; ".join(parts)
+    def _build_warning(name_hits: list, address_hits: list, country_hits: list | None = None) -> str:
+        from apps.compliance.services import build_sanction_warning
+        return build_sanction_warning(name_hits, address_hits, country_hits)
+
+    @action(detail=True, methods=["get"], url_path="payout-banks")
+    def payout_banks(self, request, order_no=None):
+        """Rank payout banks by Fee Rule then Balances for this instruction."""
+        from apps.routing.services import RoutingService
+
+        order = self.get_object()
+        amount = RoutingService.payout_amount_for_order(order)
+        currency = RoutingService.payout_currency_for_order(order)
+        ranked = RoutingService.rank_payout_banks(amount, currency)
+        recommended = next((row for row in ranked if row["recommended"]), None)
+        return Response({
+            "order_no": order.order_no,
+            "amount": str(amount),
+            "currency": currency,
+            "recommended_bank_code": recommended["bank_code"] if recommended else None,
+            "results": ranked,
+        })
 
     # ── 确认转账（推入待清算） ──
 
     @action(detail=True, methods=["post"], url_path="confirm-transfer")
-    @require_permission("payment:create")
     def confirm_transfer(self, request, order_no=None):
         """确认已发起银行转账，将订单推入待清算状态。
 
         PAY_RECEIVED / PENDING_PAY → PENDING_SETTLE
 
         运营人员确认银行转账已发起后，订单进入待清算队列，
-        等待每日结算批次处理。
+        等待每日结算批次处理。汇出银行按 Fee Rule 升序、余额是否足够瀑布选择。
         """
         order = self.get_object()
         if order.status not in ("PAY_RECEIVED", "PENDING_PAY"):
@@ -447,23 +436,52 @@ class PaymentOrderViewSet(viewsets.ReadOnlyModelViewSet):
             )
 
         from django.utils import timezone
+        from apps.payment.services.payment import PaymentConfirmService
+        from apps.payment.services.remittance_application import assert_confirm_transfer_allowed
+        from apps.routing.services import RoutingService
+
+        assert_confirm_transfer_allowed(order)
+
         now = timezone.now()
+        selected = RoutingService.bind_payout_bank(
+            order, bank_code=(request.data.get("bank_code") or "").strip(),
+        )
+        order.save(update_fields=["bank_code", "updated_at"])
 
         if order.status == "PENDING_PAY":
-            order.pay_received_at = now
-        order.status = "PENDING_SETTLE"
-        order.bank_txn_id = request.data.get("bank_txn_id", order.bank_txn_id or "")
-        order.add_status_history("PENDING_SETTLE", {
-            "operator": request.data.get("reviewed_by", ""),
-            "bank_txn_id": order.bank_txn_id,
-        })
-        order.save(update_fields=[
-            "status", "bank_txn_id", "pay_received_at", "updated_at", "status_history",
-        ])
+            order = PaymentConfirmService().manual_confirm_by_order_no(
+                order.order_no,
+                bank_txn_id=request.data.get("bank_txn_id", "") or order.bank_txn_id or "",
+            )
+            self._ensure_fee_share(order)
+
+        order.refresh_from_db()
+        if order.status == "PAY_RECEIVED":
+            from apps.account.services import AccountService
+            AccountService().debit_va_for_order_outflow(
+                order,
+                remark=f"Confirm transfer {order.order_no}",
+            )
+            order.status = "PENDING_SETTLE"
+            if request.data.get("bank_txn_id"):
+                order.bank_txn_id = request.data.get("bank_txn_id")
+            order.add_status_history("PENDING_SETTLE", {
+                "operator": request.data.get("reviewed_by", ""),
+                "bank_txn_id": order.bank_txn_id,
+                "bank_code": order.bank_code,
+            })
+            order.save(update_fields=[
+                "status", "bank_txn_id", "bank_code", "pay_received_at",
+                "updated_at", "status_history",
+            ])
+            from apps.payment.services.notify import trigger_order_notify
+            trigger_order_notify(order)
 
         return Response({
             "message": "Transfer confirmed, order pending settlement",
             "status": order.status,
+            "bank_code": order.bank_code,
+            "computed_fee": selected.get("computed_fee"),
             "confirmed_at": now.isoformat(),
         })
 
@@ -557,112 +575,43 @@ class PaymentOrderViewSet(viewsets.ReadOnlyModelViewSet):
             ],
         })
 
-    # ── 费用预览 ──
+    # ── 汇款报价 ──
+
+    def _create_remittance_quote(self, data):
+        serializer = RemittanceQuoteRequestSerializer(data=data)
+        serializer.is_valid(raise_exception=True)
+        merchant_no = serializer.validated_data.get("merchant", "")
+        if not merchant_no:
+            raise BusinessException("MERCHANT_REQUIRED", "Please select the remitting customer", 400)
+        from apps.merchant.models import Merchant
+        merchant = Merchant.objects.filter(
+            merchant_no=merchant_no, is_deleted=False
+        ).select_related("agent").first()
+        if not merchant:
+            raise BusinessException("MERCHANT_NOT_FOUND", "The customer does not exist or has been closed", 404)
+        quote = RemittanceQuoteService().create_quote(
+            merchant=merchant,
+            amount=serializer.validated_data["amount"],
+            from_currency=serializer.validated_data["from_currency"],
+            to_currency=serializer.validated_data["to_currency"],
+            fee_bearing=serializer.validated_data["fee_bearing"],
+            actor_type="ADMIN",
+        )
+        return RemittanceQuoteService.serialize(quote)
+
+    @action(detail=False, methods=["post"], url_path="quote")
+    def quote_remittance(self, request):
+        return Response(
+            self._create_remittance_quote(request.data),
+            status=status.HTTP_201_CREATED,
+        )
 
     @action(detail=False, methods=["get"], url_path="fee_preview")
     def fee_preview(self, request):
-        """实时预览手续费与结算金额。
-
-        GET /api/v1/admin/orders/fee_preview/?merchant=M20260003&amount=1000&from_currency=USD&to_currency=CNY
-
-        返回：费用明细（手续费率、固定手续费、手续费总额、结算金额、汇率）
-        """
-        merchant_no = request.query_params.get("merchant")
-        amount_str = request.query_params.get("amount")
-        from_currency = request.query_params.get("from_currency", "USD")
-        to_currency = request.query_params.get("to_currency", "CNY")
-
-        if not merchant_no or not amount_str:
-            return Response(
-                {"detail": "merchant and amount parameters are required"},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        try:
-            amount = float(amount_str)
-        except (ValueError, TypeError):
-            return Response({"detail": "amount must be a valid number"}, status=status.HTTP_400_BAD_REQUEST)
-
-        if amount <= 0:
-            return Response({"detail": "Amount must be greater than 0"}, status=status.HTTP_400_BAD_REQUEST)
-
-        # 查询商户
-        from apps.merchant.models import Merchant
-        try:
-            merchant = Merchant.objects.get(merchant_no=merchant_no, is_deleted=False)
-        except Merchant.DoesNotExist:
-            return Response({"detail": "Merchant not found"}, status=status.HTTP_404_NOT_FOUND)
-
-        # 查询汇率
-        from django.utils import timezone
-        from apps.exchange.models import ExchangeRate
-        today = timezone.now().date()
-        try:
-            rate_obj = ExchangeRate.objects.get(
-                date=today, from_currency=from_currency, to_currency=to_currency, is_deleted=False
-            )
-            exchange_rate_val = float(rate_obj.rate)
-            rate_source = rate_obj.source
-        except ExchangeRate.DoesNotExist:
-            exchange_rate_val = None
-            rate_source = "Not available"
-
-        # 手续费 = 固定手续费 + (汇款金额 × 手续费率)
-        fee_rate_pct = float(merchant.fee_rate or 0)
-        fixed_fee = float(merchant.fixed_fee or 0)
-        percentage_fee = round(amount * fee_rate_pct / 100, 2)
-        total_fee = round(percentage_fee + fixed_fee, 2)
-
-        # 到账金额 = 汇款金额 × 汇率 - 手续费（如有汇率）
-        if exchange_rate_val:
-            target_amount = round(amount * exchange_rate_val, 2)
-            settle_amount = round(target_amount - total_fee, 2)
-            settle_label = f"{to_currency} {settle_amount:,.2f}"
-        else:
-            target_amount = amount
-            settle_amount = round(amount - total_fee, 2)
-            settle_label = f"{settle_amount:,.2f}"
-
-        # 单笔限额 & 日限额
-        max_single = float(merchant.max_single_amount) if merchant.max_single_amount else None
-        daily_limit_val = float(merchant.daily_limit) if merchant.daily_limit else None
-
-        # 检查今日已用额度
-        from django.db.models import Sum
-        today_used = PaymentOrder.objects.filter(
-            merchant=merchant,
-            is_deleted=False,
-            created_at__date=today,
-        ).exclude(status__in=["CLOSED", "REFUNDED"]).aggregate(
-            total=Sum("amount")
-        )["total"] or 0
-        today_used = float(today_used)
-        remaining_daily = round(daily_limit_val - today_used, 2) if daily_limit_val else None
-
-        return Response({
-            "merchant_name": merchant.merchant_name,
-            "merchant_no": merchant.merchant_no,
-            "risk_level": merchant.risk_level,
-            "amount": amount,
-            "from_currency": from_currency,
-            "to_currency": to_currency,
-            "exchange_rate": exchange_rate_val,
-            "rate_source": rate_source,
-            "fee_rate_pct": fee_rate_pct,
-            "fixed_fee": fixed_fee,
-            "percentage_fee": percentage_fee,
-            "total_fee": total_fee,
-            "settle_amount": settle_amount,
-            "target_amount": target_amount,
-            "fee_formula": f"Fixed fee {fixed_fee} + (Amount {amount} x Fee rate {fee_rate_pct}%) = {total_fee}",
-            "max_single_amount": max_single,
-            "daily_limit": daily_limit_val,
-            "today_used": today_used,
-            "remaining_daily": remaining_daily,
-        })
+        """兼容旧客户端；返回与 POST quote 相同的可提交报价。"""
+        return Response(self._create_remittance_quote(request.query_params))
 
     @action(detail=True, methods=["post"], url_path="upload-contract")
-    @require_permission("payment:create")
     def upload_contract(self, request, order_no=None):
         """上传合同文件，保存到 MEDIA，写入 contract_file 路径。"""
         order = self.get_object()
@@ -682,7 +631,6 @@ class PaymentOrderViewSet(viewsets.ReadOnlyModelViewSet):
     # ── 退款发起 ──
 
     @action(detail=True, methods=["post"], url_path="refund-initiate")
-    @require_permission("payment:refund")
     def refund_initiate(self, request, order_no=None):
         """对已完成的汇款发起退款。
 
@@ -695,7 +643,7 @@ class PaymentOrderViewSet(viewsets.ReadOnlyModelViewSet):
         order = self.get_object()
 
         # ── 可退款状态校验 ──
-        REFUNDABLE_STATUSES = ("PENDING_PAY", "SETTLED", "PAY_RECEIVED", "PENDING_SETTLE", "REFUNDING")
+        REFUNDABLE_STATUSES = ("PENDING_PAY", "SETTLED", "COMPLETED", "PAY_RECEIVED", "PENDING_SETTLE", "REFUNDING")
         if order.status not in REFUNDABLE_STATUSES:
             return Response(
                 {"detail": f"Current status is {order.status}, can only initiate refund for settled orders"},
@@ -742,8 +690,14 @@ class PaymentOrderViewSet(viewsets.ReadOnlyModelViewSet):
         }, status=status.HTTP_201_CREATED)
 
 
-class RefundOrderViewSet(viewsets.ReadOnlyModelViewSet):
+class RefundOrderViewSet(RequiresFeature, viewsets.ReadOnlyModelViewSet):
     """退款查询 ViewSet — 运营管理端。"""
+    authentication_classes = [JWTAuthentication]
+    feature_code = "feature:refunds"
+    ACTION_FEATURES = {
+        "review": "feature:refunds.approve",
+        "execute": "feature:refunds.approve",
+    }
     queryset = RefundOrder.objects.filter(is_deleted=False).select_related(
         "payment_order", "payment_order__merchant"
     )
@@ -887,23 +841,27 @@ class RefundOrderViewSet(viewsets.ReadOnlyModelViewSet):
 
 class MerchantOrderViewSet(viewsets.ReadOnlyModelViewSet):
     """商户侧订单查询。"""
+    authentication_classes = [HMACAuthentication]
+    permission_classes = [HasHMACPrincipal]
     serializer_class = PaymentOrderSerializer
 
     def get_queryset(self):
-        # 从认证中获取商户
         merchant = getattr(self.request, "merchant", None)
-        merchant_no = self.request.query_params.get("merchant_no")
-        if merchant:
-            merchant_no = merchant.merchant_no
-        if not merchant_no:
+        if not merchant:
             return PaymentOrder.objects.none()
-        return PaymentOrder.objects.filter(
-            merchant__merchant_no=merchant_no, is_deleted=False
+        qs = PaymentOrder.objects.filter(
+            merchant=merchant, is_deleted=False
         ).select_related("merchant")
+        status_filter = self.request.query_params.get("status")
+        if status_filter:
+            qs = qs.filter(status=status_filter)
+        return qs
 
 
 class MerchantRefundViewSet(viewsets.GenericViewSet):
     """商户侧退款。"""
+    authentication_classes = [HMACAuthentication]
+    permission_classes = [HasHMACPrincipal]
     refund_service = RefundService()
 
     @action(detail=False, methods=["post"], url_path="apply")
@@ -913,8 +871,13 @@ class MerchantRefundViewSet(viewsets.GenericViewSet):
         serializer.is_valid(raise_exception=True)
 
         data = serializer.validated_data
+        merchant = getattr(request, "merchant", None)
         try:
-            order = PaymentOrder.objects.get(order_no=data["order_no"], is_deleted=False)
+            order = PaymentOrder.objects.get(
+                order_no=data["order_no"],
+                merchant=merchant,
+                is_deleted=False,
+            )
         except PaymentOrder.DoesNotExist:
             raise BusinessException(ErrorCode.ORDER_NOT_FOUND)
 

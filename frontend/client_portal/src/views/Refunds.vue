@@ -1,86 +1,106 @@
 <template>
-  <el-card class="page-card" shadow="never">
-    <div class="toolbar">
-      <el-input v-model="filters.search" placeholder="退款号 / 订单号 / PRN / 商户" clearable style="width: 260px" @keyup.enter="reload" />
-      <el-select v-model="filters.status" placeholder="状态" clearable style="width: 140px">
-        <el-option label="待审核" value="PENDING_REVIEW" />
-        <el-option label="已通过" value="APPROVED" />
-        <el-option label="已拒绝" value="REJECTED" />
-        <el-option label="处理中" value="PROCESSING" />
-        <el-option label="已完成" value="SUCCESS" />
-        <el-option label="失败" value="FAILED" />
-      </el-select>
-      <el-button type="primary" @click="reload">查询</el-button>
-      <el-button @click="reset">重置</el-button>
+  <div>
+    <PageHeader title="Refunds" subtitle="Initiate refunds against completed remittances and credit the proceeds to the customer account" />
+    <KpiCards :items="kpis" />
+    <el-alert type="warning" :closable="false" class="fee-banner">
+      Refund charge rate {{ feeRate }}%
+      <el-button link type="primary" @click="setFee">Configure</el-button>
+    </el-alert>
+    <div class="page-card">
+      <div class="toolbar">
+        <el-input v-model="filters.search" placeholder="Refund reference / remittance reference / customer" clearable style="width: 240px" @keyup.enter="reload" />
+        <el-select v-model="filters.status" placeholder="All statuses" clearable style="width: 140px" @change="reload">
+          <el-option label="Pending review" value="PENDING_REVIEW" />
+          <el-option label="In process" value="PROCESSING" />
+          <el-option label="Successful" value="SUCCESS" />
+          <el-option label="Rejected" value="REJECTED" />
+        </el-select>
+        <el-button @click="reload">Refresh</el-button>
+      </div>
+      <el-table :data="rows" v-loading="loading">
+        <el-table-column prop="refund_no" label="Refund no." min-width="160" />
+        <el-table-column prop="order_no" label="Order No." min-width="160" />
+        <el-table-column prop="merchant_name" label="Customer" min-width="130" />
+        <el-table-column prop="refund_amount" label="Amount" min-width="100" :formatter="formatMoneyCell" />
+        <el-table-column prop="refund_fee_amount" label="Charges" min-width="90" :formatter="formatMoneyCell" />
+        <el-table-column prop="refund_reason" label="Reason" min-width="140" />
+        <el-table-column label="Status" width="110">
+          <template #default="{ row }"><StatusPill :value="row.status" /></template>
+        </el-table-column>
+        <el-table-column label="Creation Time" min-width="160"><template #default="{ row }">{{ datetime(row.created_at) }}</template></el-table-column>
+        <el-table-column label="Actions" width="160" fixed="right">
+          <template #default="{ row }">
+            <el-button v-if="row.status === 'PENDING_REVIEW' && canApprove" link type="success" @click="review(row, 'approve')">Approve</el-button>
+            <el-button v-if="row.status === 'PENDING_REVIEW' && canApprove" link type="danger" @click="review(row, 'reject')">Reject</el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+      <el-pagination class="toolbar" background layout="total, prev, pager, next" :total="total" :page-size="pageSize" :current-page="page" @current-change="onPage" />
     </div>
-
-    <el-table :data="rows" v-loading="loading" border stripe>
-      <el-table-column prop="refund_no" label="退款单号" min-width="180" />
-      <el-table-column prop="order_no" label="原订单号" min-width="180" />
-      <el-table-column prop="merchant_name" label="商户" min-width="140" />
-      <el-table-column prop="amount" label="退款金额" min-width="120" />
-      <el-table-column prop="currency" label="币种" width="90" />
-      <el-table-column prop="status" label="状态" min-width="120" />
-      <el-table-column label="操作" width="200" fixed="right">
-        <template #default="{ row }">
-          <el-button link type="primary" @click="review(row)" :disabled="row.status !== 'PENDING_REVIEW'">审核</el-button>
-          <el-button link type="success" @click="initiate(row)" :disabled="!['APPROVED', 'FAILED'].includes(row.status)">发起退款</el-button>
-        </template>
-      </el-table-column>
-    </el-table>
-
-    <el-pagination class="toolbar" background layout="total, prev, pager, next" :total="total" :page-size="pageSize" :current-page="page" @current-change="onPage" />
-  </el-card>
+  </div>
 </template>
 
 <script setup>
-import { ref, reactive, onMounted } from 'vue'
-import { ElMessage } from 'element-plus'
-import { getRefunds, reviewRefund, initiateRefund } from '@/api/refunds'
+import { computed, onMounted, reactive, ref } from 'vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import PageHeader from '@/components/PageHeader.vue'
+import StatusPill from '@/components/StatusPill.vue'
+import KpiCards from '@/components/KpiCards.vue'
+import { getRefunds, getRefundStats, getRefundFeeConfig, reviewRefund } from '@/api/refunds'
+import request from '@/api/request'
+import { unwrapList, datetime, money, formatMoneyCell } from '@/utils/format'
+import { useAuthStore } from '@/store/auth'
+
+const auth = useAuthStore()
+const canApprove = computed(() => auth.hasPermission('feature:refunds.approve'))
 
 const rows = ref([])
+const stats = ref({})
+const feeRate = ref('0.1')
 const total = ref(0)
 const page = ref(1)
-const pageSize = ref(20)
+const pageSize = 20
 const loading = ref(false)
 const filters = reactive({ search: '', status: '' })
-
+const kpis = computed(() => [
+  { label: 'Total refund instructions', value: stats.value.total_count ?? 0 },
+  { label: 'Pending review', value: stats.value.pending_review ?? 0 },
+  { label: 'Refunds today', value: stats.value.today_count ?? 0 },
+  { label: 'Aggregate refund amount', value: money(stats.value.total_amount) }
+])
 async function load() {
   loading.value = true
   try {
-    const data = await getRefunds({ page: page.value, page_size: pageSize.value, search: filters.search || undefined, status: filters.status || undefined })
-    rows.value = data.results || []
-    total.value = data.count || 0
-  } finally {
-    loading.value = false
+    stats.value = await getRefundStats()
+    const cfg = await getRefundFeeConfig()
+    feeRate.value = cfg.fee_rate
+    const data = await getRefunds({ page: page.value, page_size: pageSize, search: filters.search || undefined, status: filters.status || undefined })
+    const u = unwrapList(data)
+    rows.value = u.rows.map((r) => ({ ...r, order_no: r.order_no || r.payment_order_no }))
+    total.value = u.total
+  } finally { loading.value = false }
+}
+function reload() { page.value = 1; load() }
+function onPage(p) { page.value = p; load() }
+async function review(row, action) {
+  let comment = ''
+  if (action === 'reject') {
+    const { value } = await ElMessageBox.prompt('Enter the grounds for rejection', 'Reject', { inputPattern: /.+/, inputErrorMessage: 'A rejection reason is required.' })
+    comment = value
   }
-}
-async function review(row) {
-  await reviewRefund(row.refund_no, { action: 'approve', reviewer: 'admin', remark: '后台审核通过' })
-  ElMessage.success('审核通过')
+  await reviewRefund(row.refund_no, { action, comment })
+  ElMessage.success('The refund application has been processed.')
   load()
 }
-async function initiate(row) {
-  await initiateRefund(row.refund_no)
-  ElMessage.success('已发起退款')
-  load()
-}
-function reload() {
-  page.value = 1
-  load()
-}
-function reset() {
-  filters.search = ''
-  filters.status = ''
-  reload()
-}
-function onPage(p) {
-  page.value = p
+async function setFee() {
+  const { value } = await ElMessageBox.prompt('Refund charge rate (%)', 'Configure', { inputValue: String(feeRate.value) })
+  await request.put('/v1/admin/refunds/fee-config/', { fee_rate: value })
+  ElMessage.success('The refund charge rate has been updated.')
   load()
 }
 onMounted(load)
 </script>
 
 <style scoped>
-.toolbar { margin-bottom: 16px; display: flex; gap: 8px; }
+.fee-banner { margin-bottom: 14px; }
 </style>

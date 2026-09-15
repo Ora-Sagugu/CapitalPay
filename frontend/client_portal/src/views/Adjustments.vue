@@ -1,82 +1,92 @@
 <template>
-  <el-card class="page-card" shadow="never">
-    <div class="toolbar">
-      <el-select v-model="filters.status" placeholder="状态" clearable style="width: 140px">
-        <el-option label="待审批" value="pending" />
-        <el-option label="已通过" value="approved" />
-        <el-option label="已拒绝" value="rejected" />
-      </el-select>
-      <el-button type="primary" @click="reload">查询</el-button>
-      <el-button @click="reset">重置</el-button>
+  <div>
+    <PageHeader title="Adjustments" subtitle="Manual adjustments and discrepancy items" />
+    <div class="page-card">
+      <div class="toolbar">
+        <el-input v-model="filters.order_no" placeholder="Order reference" clearable style="width: 180px" />
+        <el-select v-model="filters.status" placeholder="Status" clearable style="width: 140px" @change="load">
+          <el-option label="Pending review" value="pending" />
+          <el-option label="Approved" value="approved" />
+          <el-option label="Rejected" value="rejected" />
+        </el-select>
+        <el-button @click="load">Search</el-button>
+        <el-button type="primary" @click="visible = true">Create ledger adjustment</el-button>
+      </div>
+      <el-table :data="rows" v-loading="loading">
+        <el-table-column prop="application_no" label="Application no." min-width="150" />
+        <el-table-column prop="order_no" label="Order reference" min-width="150" />
+        <el-table-column prop="diff_type" label="Discrepancy type" min-width="120" />
+        <el-table-column prop="amount" label="Amount" min-width="100" :formatter="formatMoneyCell" />
+        <el-table-column label="Status" width="110">
+          <template #default="{ row }"><StatusPill kind="onboarding" :value="row.status" /></template>
+        </el-table-column>
+        <el-table-column label="Actions" width="160">
+          <template #default="{ row }">
+            <el-button v-if="canApprove" link type="success" @click="approve(row)">Approve</el-button>
+            <el-button v-if="canApprove" link type="danger" @click="reject(row)">Reject</el-button>
+          </template>
+        </el-table-column>
+      </el-table>
     </div>
-
-    <el-table :data="rows" v-loading="loading" border stripe>
-      <el-table-column prop="id" label="ID" width="80" />
-      <el-table-column prop="application_no" label="调账单号" min-width="180" />
-      <el-table-column prop="bank_channel" label="银行通道" min-width="160" />
-      <el-table-column prop="adjustment_amount" label="调账金额" min-width="120" />
-      <el-table-column prop="currency" label="币种" width="90" />
-      <el-table-column prop="reason" label="原因" min-width="200" />
-      <el-table-column prop="status" label="状态" min-width="120" />
-      <el-table-column label="操作" width="160" fixed="right">
-        <template #default="{ row }">
-          <el-button link type="primary" @click="approve(row)" :disabled="row.status !== 'pending'">通过</el-button>
-          <el-button link type="danger" @click="reject(row)" :disabled="row.status !== 'pending'">拒绝</el-button>
-        </template>
-      </el-table-column>
-    </el-table>
-
-    <el-pagination class="toolbar" background layout="total, prev, pager, next" :total="total" :page-size="pageSize" :current-page="page" @current-change="onPage" />
-  </el-card>
+    <el-dialog v-model="visible" title="Create ledger adjustment" width="480px">
+      <el-form :model="form" label-width="100px">
+        <el-form-item label="Order No."><el-input v-model="form.order_no" /></el-form-item>
+        <el-form-item label="Discrepancy type">
+          <el-select v-model="form.diff_type" style="width: 100%">
+            <el-option label="Amount discrepancy" value="amount" />
+            <el-option label="Item-count discrepancy" value="count" />
+            <el-option label="Status discrepancy" value="status" />
+            <el-option label="Duplicate transaction" value="duplicate" />
+            <el-option label="Missing transaction" value="missing" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="Amount"><el-input v-model="form.amount" /></el-form-item>
+        <el-form-item label="Reason"><el-input v-model="form.reason" type="textarea" /></el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="visible = false">Cancel</el-button>
+        <el-button type="primary" @click="save">Submit</el-button>
+      </template>
+    </el-dialog>
+  </div>
 </template>
 
 <script setup>
-import { ref, reactive, onMounted } from 'vue'
-import { ElMessage } from 'element-plus'
-import { getAdjustments, approveAdjustment, rejectAdjustment } from '@/api/adjustment'
+import { computed, onMounted, reactive, ref } from 'vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import PageHeader from '@/components/PageHeader.vue'
+import StatusPill from '@/components/StatusPill.vue'
+import { getAdjustments, createAdjustment, approveAdjustment, rejectAdjustment } from '@/api/adjustment'
+import { unwrapList, formatMoneyCell } from '@/utils/format'
+import { useAuthStore } from '@/store/auth'
+
+const auth = useAuthStore()
+const canApprove = computed(() => auth.hasPermission('feature:adjustments.approve'))
 
 const rows = ref([])
-const total = ref(0)
-const page = ref(1)
-const pageSize = ref(20)
 const loading = ref(false)
-const filters = reactive({ status: '' })
-
+const visible = ref(false)
+const filters = reactive({ order_no: '', status: '' })
+const form = reactive({ order_no: '', diff_type: 'amount', amount: '', reason: '' })
 async function load() {
   loading.value = true
-  try {
-    const data = await getAdjustments({ page: page.value, page_size: pageSize.value, status: filters.status || undefined })
-    rows.value = data.results || []
-    total.value = data.count || data.total || 0
-  } finally {
-    loading.value = false
-  }
+  try { rows.value = unwrapList(await getAdjustments(filters)).rows } finally { loading.value = false }
 }
-async function approve(row) {
-  await approveAdjustment(row.id, { action: 'approve', approver: 'admin', comment: '通过' })
-  ElMessage.success('已通过')
+async function save() {
+  await createAdjustment({
+    ...form,
+    applicant: 'admin',
+    adjustment_amount: form.amount
+  })
+  ElMessage.success('The ledger-adjustment application has been submitted.')
+  visible.value = false
   load()
 }
+async function approve(row) { await approveAdjustment(row.id); load() }
 async function reject(row) {
-  await rejectAdjustment(row.id, { action: 'reject', approver: 'admin', comment: '拒绝' })
-  ElMessage.success('已拒绝')
-  load()
-}
-function reload() {
-  page.value = 1
-  load()
-}
-function reset() {
-  filters.status = ''
-  reload()
-}
-function onPage(p) {
-  page.value = p
+  const { value } = await ElMessageBox.prompt('Enter the grounds for rejection', 'Reject', { inputPattern: /.+/, inputErrorMessage: 'A rejection reason is required.' })
+  await rejectAdjustment(row.id, { comment: value })
   load()
 }
 onMounted(load)
 </script>
-
-<style scoped>
-.toolbar { margin-bottom: 16px; display: flex; gap: 8px; }
-</style>

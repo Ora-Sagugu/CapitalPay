@@ -1,15 +1,20 @@
-from typing import Optional
 from rest_framework import viewsets, status
 from rest_framework.response import Response
-from rest_framework.permissions import AllowAny
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.views import APIView
+from apps.rbac.permissions import RequiresFeature
 from .services import ParamService
-from .serializers import CoopBankSerializer, CoopBankListSerializer, FeeModelSerializer, BankFeeConfigSerializer
-from .models import CoopBank, FeeModel, BankFeeConfig
+from .serializers import (
+    CoopBankSerializer, CoopBankListSerializer, FeeModelSerializer,
+    BankFeeConfigSerializer, RiskRatingLimitSerializer, RemittanceFeeConfigSerializer,
+)
+from .models import CoopBank, FeeModel, BankFeeConfig, RiskRatingLimit, RemittanceFeeConfig
 
 
-class CoopBankViewSet(viewsets.ViewSet):
+class CoopBankViewSet(RequiresFeature, viewsets.ViewSet):
     """合作银行管理"""
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
+    feature_code = "feature:params"
 
     def list(self, request):
         status_param = request.query_params.get("status")
@@ -47,9 +52,10 @@ class CoopBankViewSet(viewsets.ViewSet):
         return Response({"detail": "Not found"}, status=status.HTTP_404_NOT_FOUND)
 
 
-class FeeModelViewSet(viewsets.ViewSet):
+class FeeModelViewSet(RequiresFeature, viewsets.ViewSet):
     """手续费模型管理"""
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
+    feature_code = "feature:params"
 
     def list(self, request):
         fee_type = request.query_params.get("fee_type")
@@ -87,9 +93,10 @@ class FeeModelViewSet(viewsets.ViewSet):
         return Response({"detail": "Not found"}, status=status.HTTP_404_NOT_FOUND)
 
 
-class BankFeeConfigViewSet(viewsets.ViewSet):
+class BankFeeConfigViewSet(RequiresFeature, viewsets.ViewSet):
     """银行手续费配置管理"""
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
+    feature_code = "feature:params"
 
     def list(self, request):
         bank_id = request.query_params.get("bank_id")
@@ -126,3 +133,55 @@ class BankFeeConfigViewSet(viewsets.ViewSet):
         if ParamService.delete_bank_fee_config(pk):
             return Response(status=status.HTTP_204_NO_CONTENT)
         return Response({"detail": "Not found"}, status=status.HTTP_404_NOT_FOUND)
+
+
+class RiskRatingLimitViewSet(RequiresFeature, viewsets.ViewSet):
+    """风险等级默认限额：固定四档，仅允许修改限额字段。"""
+    permission_classes = [IsAuthenticated]
+    feature_code = "feature:risk_rating"
+
+    def list(self, request):
+        rows = ParamService.list_risk_rating_limits()
+        data = RiskRatingLimitSerializer(rows, many=True).data
+        return Response({"total": len(data), "results": data})
+
+    def retrieve(self, request, pk=None):
+        try:
+            row = RiskRatingLimit.objects.get(id=pk)
+            return Response(RiskRatingLimitSerializer(row).data)
+        except RiskRatingLimit.DoesNotExist:
+            return Response({"detail": "Not found"}, status=status.HTTP_404_NOT_FOUND)
+
+    def update(self, request, pk=None):
+        return self._save(request, pk)
+
+    def partial_update(self, request, pk=None):
+        return self._save(request, pk)
+
+    def _save(self, request, pk):
+        ser = RiskRatingLimitSerializer(data=request.data, partial=True)
+        ser.is_valid(raise_exception=True)
+        row = ParamService.update_risk_rating_limit(pk, ser.validated_data)
+        if row:
+            return Response(RiskRatingLimitSerializer(row).data)
+        return Response({"detail": "Not found"}, status=status.HTTP_404_NOT_FOUND)
+
+
+class RemittanceFeeConfigView(RequiresFeature, APIView):
+    """全局汇款手续费单例：GET / PUT /api/v1/admin/remittance-fee-config/"""
+    permission_classes = [IsAuthenticated]
+    feature_code = "feature:remittance_fees"
+
+    def get(self, request):
+        config = RemittanceFeeConfig.get_config()
+        return Response(RemittanceFeeConfigSerializer(config).data)
+
+    def put(self, request):
+        config = RemittanceFeeConfig.get_config()
+        ser = RemittanceFeeConfigSerializer(config, data=request.data, partial=True)
+        ser.is_valid(raise_exception=True)
+        updated = ParamService.update_remittance_fee_config(
+            ser.validated_data,
+            updated_by=getattr(request.user, "username", "") or "admin",
+        )
+        return Response(RemittanceFeeConfigSerializer(updated).data)

@@ -3,6 +3,7 @@
 包含: NostroAccount (我司在他行账户)、UserAccount (用户账户绑定)、FundTransfer (资金调拨)。
 """
 from decimal import Decimal
+import uuid
 from django.db import models
 from django.utils import timezone
 from apps.core.models import BaseModel
@@ -18,6 +19,8 @@ class NostroAccount(BaseModel):
         SETTLEMENT = "SETTLEMENT", "结算账户"
         COLLECTION = "COLLECTION", "收款账户"
         RESERVE = "RESERVE", "备付金账户"
+        CURRENT = "CURRENT", "往来账户"
+        FEE = "FEE", "手续费账户"
 
     account_no = models.CharField(max_length=32, unique=True, verbose_name="账户编号")
     bank_code = models.CharField(max_length=16, verbose_name="银行编码")
@@ -46,6 +49,10 @@ class NostroAccount(BaseModel):
     merchant = models.ForeignKey(
         "merchant.Merchant", on_delete=models.SET_NULL, null=True, blank=True,
         related_name="nostro_accounts", verbose_name="关联客户"
+    )
+    agent = models.ForeignKey(
+        "agent.Agent", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="nostro_accounts", verbose_name="关联代理商"
     )
 
     class Meta:
@@ -178,9 +185,22 @@ class DepositRequest(BaseModel):
         APPROVED = "APPROVED", "已通过"
         REJECTED = "REJECTED", "已拒绝"
 
+    class DepositSource(models.TextChoices):
+        CUSTOMER = "CUSTOMER", "客户充值"
+        AGENT_SELF = "AGENT_SELF", "代理自充"
+
     deposit_no = models.CharField(max_length=32, unique=True, db_index=True, verbose_name="入账单号")
     merchant = models.ForeignKey(
-        "merchant.Merchant", on_delete=models.PROTECT, related_name="deposits", verbose_name="客户"
+        "merchant.Merchant", on_delete=models.PROTECT, null=True, blank=True,
+        related_name="deposits", verbose_name="客户"
+    )
+    agent = models.ForeignKey(
+        "agent.Agent", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="deposits", verbose_name="代理商"
+    )
+    source = models.CharField(
+        max_length=16, choices=DepositSource.choices, default=DepositSource.CUSTOMER,
+        verbose_name="来源",
     )
     account = models.ForeignKey(
         NostroAccount, on_delete=models.SET_NULL, null=True, blank=True,
@@ -203,6 +223,7 @@ class DepositRequest(BaseModel):
         ordering = ["-created_at"]
         indexes = [
             models.Index(fields=["merchant", "status"]),
+            models.Index(fields=["agent", "status"]),
             models.Index(fields=["currency", "status"]),
         ]
 
@@ -258,6 +279,10 @@ class VirtualAccount(BaseModel):
         "merchant.Merchant", on_delete=models.SET_NULL, null=True, blank=True,
         related_name="virtual_accounts", verbose_name="关联客户",
     )
+    agent = models.ForeignKey(
+        "agent.Agent", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="virtual_accounts", verbose_name="关联代理商",
+    )
     order = models.ForeignKey(
         "payment.PaymentOrder", on_delete=models.SET_NULL, null=True, blank=True,
         related_name="virtual_accounts", verbose_name="关联订单(一笔一码)",
@@ -301,6 +326,7 @@ class VirtualAccount(BaseModel):
         ordering = ["-created_at"]
         indexes = [
             models.Index(fields=["merchant", "va_type", "status"]),
+            models.Index(fields=["agent", "va_type", "status"]),
             models.Index(fields=["order"]),
         ]
 
@@ -337,6 +363,132 @@ class VirtualAccount(BaseModel):
         """同步可用余额：冻结时为 0，否则等于分类账余额。"""
         self.available_balance = Decimal("0") if self.is_frozen else self.ledger_balance
         self.save(update_fields=["available_balance", "updated_at"])
+
+
+class MoneyMovement(models.Model):
+    """不可变资金流水 — 收款、出款、退款、分润冲正的账务事实。
+
+    仅允许插入，禁止 update/delete。同一来源幂等：
+    (source_type, source_id, movement_type) 唯一。
+    """
+
+    class MovementType(models.TextChoices):
+        COLLECTION = "COLLECTION", "系统确认收款"
+        SETTLEMENT_PAYOUT = "SETTLEMENT_PAYOUT", "清算出款"
+        REFUND = "REFUND", "退款"
+        FEE_SHARE = "FEE_SHARE", "手续费分润"
+        REVERSAL = "REVERSAL", "冲正"
+
+    class MovementStatus(models.TextChoices):
+        PENDING = "PENDING", "处理中"
+        SUCCESS = "SUCCESS", "成功"
+        FAILED = "FAILED", "失败"
+
+    class EvidenceLevel(models.TextChoices):
+        UNVERIFIED = "UNVERIFIED", "尚未证实"
+        SYSTEM_CONFIRMED = "SYSTEM_CONFIRMED", "系统确认"
+        BANK_CONFIRMED = "BANK_CONFIRMED", "银行凭证"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    movement_no = models.CharField(max_length=40, unique=True, db_index=True, verbose_name="流水号")
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True, verbose_name="创建时间")
+    occurred_at = models.DateTimeField(db_index=True, verbose_name="发生时间")
+    movement_type = models.CharField(max_length=24, choices=MovementType.choices, verbose_name="类型")
+    status = models.CharField(
+        max_length=16, choices=MovementStatus.choices, default=MovementStatus.SUCCESS, verbose_name="状态"
+    )
+    evidence_level = models.CharField(
+        max_length=24, choices=EvidenceLevel.choices, default=EvidenceLevel.SYSTEM_CONFIRMED,
+        verbose_name="证据等级",
+    )
+    amount = models.DecimalField(max_digits=18, decimal_places=2, verbose_name="金额")
+    currency = models.CharField(max_length=3, verbose_name="币种")
+    from_party_type = models.CharField(max_length=32, blank=True, default="", verbose_name="付款方类型")
+    from_party_id = models.CharField(max_length=64, blank=True, default="", verbose_name="付款方ID")
+    from_account = models.CharField(max_length=128, blank=True, default="", verbose_name="付款账号")
+    to_party_type = models.CharField(max_length=32, blank=True, default="", verbose_name="收款方类型")
+    to_party_id = models.CharField(max_length=64, blank=True, default="", verbose_name="收款方ID")
+    to_account = models.CharField(max_length=128, blank=True, default="", verbose_name="收款账号")
+    bank_code = models.CharField(max_length=16, blank=True, default="", verbose_name="银行编码")
+    bank_txn_id = models.CharField(max_length=64, blank=True, default="", verbose_name="银行流水号")
+    source_type = models.CharField(max_length=32, db_index=True, verbose_name="来源类型")
+    source_id = models.CharField(max_length=64, db_index=True, verbose_name="来源ID")
+    payment_order = models.ForeignKey(
+        "payment.PaymentOrder", on_delete=models.PROTECT, null=True, blank=True,
+        related_name="money_movements", verbose_name="支付订单",
+    )
+    settlement_batch = models.ForeignKey(
+        "settlement.SettlementBatch", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="money_movements", verbose_name="清算批次",
+    )
+    refund_order = models.ForeignKey(
+        "payment.RefundOrder", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="money_movements", verbose_name="退款单",
+    )
+    remark = models.CharField(max_length=256, blank=True, default="", verbose_name="备注")
+    extra = models.JSONField(default=dict, blank=True, verbose_name="附加信息")
+
+    class Meta:
+        db_table = "money_movement"
+        verbose_name = "资金流水"
+        verbose_name_plural = verbose_name
+        ordering = ["-occurred_at", "-created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["source_type", "source_id", "movement_type"],
+                name="uniq_money_movement_source",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["payment_order", "movement_type"]),
+            models.Index(fields=["currency", "occurred_at"]),
+            models.Index(fields=["status", "evidence_level"]),
+        ]
+
+    def __str__(self):
+        return f"{self.movement_no} {self.movement_type} {self.amount} {self.currency}"
+
+    def save(self, *args, **kwargs):
+        if not self._state.adding:
+            raise RuntimeError("资金流水不可修改")
+        super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise RuntimeError("资金流水不可删除")
+
+
+class VaLedgerEntry(BaseModel):
+    """虚拟账户分类账分录 — 收款确认、手续费、拨付等可追溯流水。"""
+
+    class EntryType(models.TextChoices):
+        CREDIT = "CREDIT", "贷记"
+        DEBIT = "DEBIT", "借记"
+
+    virtual_account = models.ForeignKey(
+        VirtualAccount, on_delete=models.PROTECT, related_name="ledger_entries", verbose_name="虚拟账户"
+    )
+    order = models.ForeignKey(
+        "payment.PaymentOrder", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="va_ledger_entries", verbose_name="关联订单",
+    )
+    entry_type = models.CharField(max_length=8, choices=EntryType.choices, verbose_name="方向")
+    amount = models.DecimalField(max_digits=18, decimal_places=2, verbose_name="金额")
+    balance_after = models.DecimalField(max_digits=18, decimal_places=2, verbose_name="记账后余额")
+    source_type = models.CharField(max_length=32, default="PAYMENT", db_index=True, verbose_name="来源类型")
+    source_id = models.CharField(max_length=64, blank=True, db_index=True, verbose_name="来源ID")
+    remark = models.CharField(max_length=256, blank=True, verbose_name="摘要")
+
+    class Meta:
+        db_table = "va_ledger_entry"
+        verbose_name = "VA分类账分录"
+        verbose_name_plural = verbose_name
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["source_type", "source_id", "entry_type"]),
+        ]
+
+    def __str__(self):
+        return f"{self.entry_type} {self.amount} {self.virtual_account.va_number}"
 
 
 class AgentDisbursement(BaseModel):

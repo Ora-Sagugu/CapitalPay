@@ -1,4 +1,5 @@
 import uuid
+from decimal import Decimal
 from typing import Optional
 from django.db import models
 from django.core.validators import MinValueValidator, MaxValueValidator
@@ -115,3 +116,95 @@ class BankFeeConfig(models.Model):
 
     def __str__(self) -> str:
         return f"{self.bank.bank_name} - {self.fee_model.model_name}"
+
+
+class RiskRatingLimit(models.Model):
+    """风险等级对应的默认单笔/日限额，供运营后台 Customers Edit 自动填充。"""
+
+    class RiskLevel(models.TextChoices):
+        LOW = "LOW", "Low"
+        MEDIUM = "MEDIUM", "Medium"
+        HIGH = "HIGH", "High"
+        BLOCKED = "BLOCKED", "Blocked"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    risk_level = models.CharField(
+        "风险等级", max_length=16, unique=True, choices=RiskLevel.choices
+    )
+    max_single_amount = models.DecimalField(
+        "单笔限额", max_digits=18, decimal_places=2, default=0
+    )
+    daily_count = models.IntegerField("每日笔数", default=0, validators=[MinValueValidator(0)])
+    daily_limit = models.DecimalField("日限额", max_digits=18, decimal_places=2, default=0)
+    created_at = models.DateTimeField("创建时间", auto_now_add=True)
+    updated_at = models.DateTimeField("更新时间", auto_now=True)
+
+    class Meta:
+        db_table = "param_risk_rating_limit"
+        verbose_name = "风险等级限额"
+        verbose_name_plural = "风险等级限额"
+        ordering = ["risk_level"]
+
+    def __str__(self) -> str:
+        return self.risk_level
+
+    def sync_daily_limit(self) -> None:
+        """日限额 = 单笔限额 × 每日笔数。"""
+        self.daily_limit = self.max_single_amount * self.daily_count
+
+    def save(self, *args, **kwargs):
+        self.sync_daily_limit()
+        super().save(*args, **kwargs)
+
+
+class RemittanceFeeConfig(models.Model):
+    """全局汇款手续费 — 单例：固定费 + 百分比，再封顶。"""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    singleton_key = models.CharField("单例键", max_length=16, unique=True, default="default")
+    fixed_fee = models.DecimalField(
+        "固定手续费",
+        max_digits=12,
+        decimal_places=2,
+        default=Decimal("0.00"),
+        validators=[MinValueValidator(Decimal("0"))],
+    )
+    percent_rate = models.DecimalField(
+        "汇款百分比(%)",
+        max_digits=8,
+        decimal_places=2,
+        default=Decimal("0.00"),
+        validators=[MinValueValidator(Decimal("0")), MaxValueValidator(Decimal("100"))],
+        help_text="例如 0.30 表示 0.30%",
+    )
+    max_fee = models.DecimalField(
+        "最高手续费",
+        max_digits=12,
+        decimal_places=2,
+        default=Decimal("0.00"),
+        validators=[MinValueValidator(Decimal("0"))],
+    )
+    updated_by = models.CharField("修改人", max_length=64, blank=True)
+    created_at = models.DateTimeField("创建时间", auto_now_add=True)
+    updated_at = models.DateTimeField("更新时间", auto_now=True)
+
+    class Meta:
+        db_table = "param_remittance_fee_config"
+        verbose_name = "汇款手续费配置"
+        verbose_name_plural = "汇款手续费配置"
+
+    def __str__(self) -> str:
+        return f"fixed {self.fixed_fee} + {self.percent_rate}% cap {self.max_fee}"
+
+    @classmethod
+    def get_config(cls) -> "RemittanceFeeConfig":
+        obj, _ = cls.objects.get_or_create(
+            singleton_key="default",
+            defaults={
+                "fixed_fee": Decimal("0.00"),
+                "percent_rate": Decimal("0.00"),
+                "max_fee": Decimal("0.00"),
+                "updated_by": "system",
+            },
+        )
+        return obj

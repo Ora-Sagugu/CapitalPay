@@ -1,11 +1,12 @@
-"""导入制裁名单种子数据命令 — OFAC / UN / EU / MPS / PBOC / INTERNAL
+"""导入制裁名单命令 — OFAC / UN
 
 用法:
-    python manage.py import_sanctions          # 追加数据
-    python manage.py import_sanctions --reset  # 先清空再填充
+    python manage.py import_sanctions --from-official --reset
+    python manage.py import_sanctions --from-official --limit 30 --dry-run
+    python manage.py import_sanctions --use-sample --reset
 """
 from datetime import date
-from django.core.management.base import BaseCommand
+from django.core.management.base import BaseCommand, CommandError
 from apps.compliance.models import SanctionList
 
 
@@ -19,7 +20,7 @@ def get_data():
         {
             "entity_name": "华为技术有限公司",
             "alias_names": "Huawei Technologies Co., Ltd., 华为",
-            "entity_type": "COMPANY",
+            "entity_type": "ORGANIZATION",
             "list_type": "OFAC",
             "risk_level": "HIGH",
             "id_number": "914403001000001234",
@@ -30,7 +31,7 @@ def get_data():
         {
             "entity_name": "芯源微电子有限公司",
             "alias_names": "Xinyuan Microelectronics Co.",
-            "entity_type": "COMPANY",
+            "entity_type": "ORGANIZATION",
             "list_type": "OFAC",
             "risk_level": "HIGH",
             "id_number": "913102300000005678",
@@ -41,7 +42,7 @@ def get_data():
         {
             "entity_name": "中科曙光信息产业股份有限公司",
             "alias_names": "Sugon Information Industry Co., Ltd.",
-            "entity_type": "COMPANY",
+            "entity_type": "ORGANIZATION",
             "list_type": "OFAC",
             "risk_level": "HIGH",
             "id_number": "911100000000009012",
@@ -52,7 +53,7 @@ def get_data():
         {
             "entity_name": "National Iranian Oil Company",
             "alias_names": "NIOC, 伊朗国家石油公司",
-            "entity_type": "COMPANY",
+            "entity_type": "ORGANIZATION",
             "list_type": "OFAC",
             "risk_level": "HIGH",
             "id_number": "",
@@ -63,7 +64,7 @@ def get_data():
         {
             "entity_name": "Korea Daesong Bank",
             "alias_names": "朝鲜大成银行",
-            "entity_type": "COMPANY",
+            "entity_type": "ORGANIZATION",
             "list_type": "OFAC",
             "risk_level": "HIGH",
             "id_number": "",
@@ -74,7 +75,7 @@ def get_data():
         {
             "entity_name": "Rosneft Trading SA",
             "alias_names": "俄罗斯石油贸易公司",
-            "entity_type": "COMPANY",
+            "entity_type": "ORGANIZATION",
             "list_type": "OFAC",
             "risk_level": "MEDIUM",
             "id_number": "",
@@ -85,7 +86,7 @@ def get_data():
         {
             "entity_name": "Cosco Shipping Tanker (Dalian) Co., Ltd.",
             "alias_names": "中远海运油轮（大连）有限公司",
-            "entity_type": "COMPANY",
+            "entity_type": "ORGANIZATION",
             "list_type": "OFAC",
             "risk_level": "MEDIUM",
             "id_number": "",
@@ -97,7 +98,7 @@ def get_data():
         {
             "entity_name": "MA, Xiaohong",
             "alias_names": "马晓红, MA Xiao Hong",
-            "entity_type": "PERSON",
+            "entity_type": "INDIVIDUAL",
             "list_type": "OFAC",
             "risk_level": "HIGH",
             "id_number": "G12345678",
@@ -108,7 +109,7 @@ def get_data():
         {
             "entity_name": "LI, Wei",
             "alias_names": "李伟, LI Wei, David Li",
-            "entity_type": "PERSON",
+            "entity_type": "INDIVIDUAL",
             "list_type": "OFAC",
             "risk_level": "HIGH",
             "id_number": "EC9876543",
@@ -119,7 +120,7 @@ def get_data():
         {
             "entity_name": "Esmaeil Qaani",
             "alias_names": "伊斯梅尔·卡尼, Qaani Esmail",
-            "entity_type": "PERSON",
+            "entity_type": "INDIVIDUAL",
             "list_type": "OFAC",
             "risk_level": "HIGH",
             "id_number": "IRN1987000001",
@@ -131,7 +132,7 @@ def get_data():
         {
             "entity_name": "GRACE 1",
             "alias_names": "Adrian Darya 1",
-            "entity_type": "VESSEL",
+            "entity_type": "ENTITY",
             "list_type": "OFAC",
             "risk_level": "HIGH",
             "id_number": "IMO 9116412",
@@ -142,7 +143,7 @@ def get_data():
         {
             "entity_name": "MT ABYAN",
             "alias_names": "阿比扬号",
-            "entity_type": "VESSEL",
+            "entity_type": "ENTITY",
             "list_type": "OFAC",
             "risk_level": "HIGH",
             "id_number": "IMO 9187650",
@@ -154,7 +155,7 @@ def get_data():
         {
             "entity_name": "Lazarus Group",
             "alias_names": "Hidden Cobra, 拉撒路组织, TEMP.Hermit",
-            "entity_type": "OTHER",
+            "entity_type": "ENTITY",
             "list_type": "OFAC",
             "risk_level": "HIGH",
             "id_number": "",
@@ -170,7 +171,7 @@ def get_data():
         {
             "entity_name": "Korea Mining Development Trading Corporation",
             "alias_names": "KOMID, 朝鲜矿业发展贸易公司",
-            "entity_type": "COMPANY",
+            "entity_type": "ORGANIZATION",
             "list_type": "UN",
             "risk_level": "HIGH",
             "id_number": "",
@@ -181,7 +182,7 @@ def get_data():
         {
             "entity_name": "Foreign Trade Bank of DPRK",
             "alias_names": "FTB, 朝鲜对外贸易银行",
-            "entity_type": "COMPANY",
+            "entity_type": "ORGANIZATION",
             "list_type": "UN",
             "risk_level": "HIGH",
             "id_number": "",
@@ -192,7 +193,7 @@ def get_data():
         {
             "entity_name": "Sharif University of Technology",
             "alias_names": "沙里夫理工大学, SUT",
-            "entity_type": "OTHER",
+            "entity_type": "ENTITY",
             "list_type": "UN",
             "risk_level": "MEDIUM",
             "id_number": "",
@@ -204,7 +205,7 @@ def get_data():
         {
             "entity_name": "RI, Hong Sop",
             "alias_names": "李洪燮, RI Hong-sop",
-            "entity_type": "PERSON",
+            "entity_type": "INDIVIDUAL",
             "list_type": "UN",
             "risk_level": "HIGH",
             "id_number": "DPRK1970000001",
@@ -215,7 +216,7 @@ def get_data():
         {
             "entity_name": "PAK, Chun Il",
             "alias_names": "朴春一, PAK Chun-il",
-            "entity_type": "PERSON",
+            "entity_type": "INDIVIDUAL",
             "list_type": "UN",
             "risk_level": "HIGH",
             "id_number": "DPRK1975000002",
@@ -226,7 +227,7 @@ def get_data():
         {
             "entity_name": "Ibrahim Jadhran",
             "alias_names": "易卜拉欣·贾德兰",
-            "entity_type": "PERSON",
+            "entity_type": "INDIVIDUAL",
             "list_type": "UN",
             "risk_level": "MEDIUM",
             "id_number": "",
@@ -238,7 +239,7 @@ def get_data():
         {
             "entity_name": "JIE SHUN",
             "alias_names": "捷顺号",
-            "entity_type": "VESSEL",
+            "entity_type": "ENTITY",
             "list_type": "UN",
             "risk_level": "HIGH",
             "id_number": "IMO 8512345",
@@ -246,235 +247,87 @@ def get_data():
             "sanction_reason": "涉嫌船对船转运朝鲜禁运物资",
             "effective_date": date(2018, 3, 30),
         },
-
-        # ========================================
-        #  EU 欧盟制裁名单
-        # ========================================
-        {
-            "entity_name": "Sberbank of Russia",
-            "alias_names": "俄罗斯联邦储蓄银行, Sberbank Rossii",
-            "entity_type": "COMPANY",
-            "list_type": "EU",
-            "risk_level": "HIGH",
-            "id_number": "",
-            "country": "俄罗斯",
-            "sanction_reason": "俄罗斯最大国有银行，为俄罗斯政府提供关键金融服务，涉及乌克兰局势",
-            "effective_date": date(2022, 7, 22),
-        },
-        {
-            "entity_name": "Vladimir Putin",
-            "alias_names": "弗拉基米尔·普京, PUTIN Vladimir Vladimirovich",
-            "entity_type": "PERSON",
-            "list_type": "EU",
-            "risk_level": "HIGH",
-            "id_number": "",
-            "country": "俄罗斯",
-            "sanction_reason": "俄罗斯联邦总统，因乌克兰军事行动受欧盟制裁",
-            "effective_date": date(2022, 2, 25),
-        },
-        {
-            "entity_name": "Wagner Group",
-            "alias_names": "瓦格纳集团, PMC Wagner, ChVK Vagner",
-            "entity_type": "OTHER",
-            "list_type": "EU",
-            "risk_level": "HIGH",
-            "id_number": "",
-            "country": "俄罗斯",
-            "sanction_reason": "俄罗斯私营军事公司，在乌克兰、叙利亚、非洲等地严重侵犯人权",
-            "effective_date": date(2021, 12, 13),
-        },
-        {
-            "entity_name": "Belarusian Republican Unitary Enterprise",
-            "alias_names": "白俄罗斯钾肥公司, Belaruskali",
-            "entity_type": "COMPANY",
-            "list_type": "EU",
-            "risk_level": "MEDIUM",
-            "id_number": "",
-            "country": "白俄罗斯",
-            "sanction_reason": "白俄罗斯政府控制的国有企业，为卢卡申科政权提供重要财政收入",
-            "effective_date": date(2021, 6, 24),
-        },
-
-        # ========================================
-        #  MPS 公安部通缉/制裁名单
-        # ========================================
-        {
-            "entity_name": "张明辉",
-            "alias_names": "张明, Zhang Minghui, 老张",
-            "entity_type": "PERSON",
-            "list_type": "MPS",
-            "risk_level": "HIGH",
-            "id_number": "350102198501011234",
-            "country": "中国",
-            "sanction_reason": "特大跨境电信诈骗团伙主犯，涉案金额超5亿元人民币",
-            "effective_date": date(2023, 1, 15),
-        },
-        {
-            "entity_name": "深圳市鑫源投资咨询有限公司",
-            "alias_names": "鑫源投资, Xinyuan Investment Consulting",
-            "entity_type": "COMPANY",
-            "list_type": "MPS",
-            "risk_level": "HIGH",
-            "id_number": "914403000000012345",
-            "country": "中国",
-            "sanction_reason": "涉嫌非法集资和洗钱，涉案资金超20亿元",
-            "effective_date": date(2022, 9, 8),
-        },
-        {
-            "entity_name": "林志远",
-            "alias_names": "林老板, LIN Zhiyuan, Tony Lin",
-            "entity_type": "PERSON",
-            "list_type": "MPS",
-            "risk_level": "HIGH",
-            "id_number": "440303197812019876",
-            "country": "中国",
-            "sanction_reason": "跨境网络赌博平台运营者，涉及资金跨境转移和洗钱",
-            "effective_date": date(2023, 4, 20),
-        },
-        {
-            "entity_name": "云南瑞兴贸易有限公司",
-            "alias_names": "瑞兴贸易, Ruixing Trading Co.",
-            "entity_type": "COMPANY",
-            "list_type": "MPS",
-            "risk_level": "MEDIUM",
-            "id_number": "915300000000005432",
-            "country": "中国",
-            "sanction_reason": "涉嫌利用边境贸易渠道进行毒品资金洗钱活动",
-            "effective_date": date(2022, 11, 3),
-        },
-
-        # ========================================
-        #  PBOC 中国人民银行反洗钱重点关注名单
-        # ========================================
-        {
-            "entity_name": "广州恒达国际贸易有限公司",
-            "alias_names": "恒达贸易, Hengda International Trading",
-            "entity_type": "COMPANY",
-            "list_type": "PBOC",
-            "risk_level": "MEDIUM",
-            "id_number": "914401000000009876",
-            "country": "中国",
-            "sanction_reason": "频繁大额跨境交易，资金来源异常，存在洗钱嫌疑",
-            "effective_date": date(2022, 5, 1),
-        },
-        {
-            "entity_name": "上海锦华进出口有限公司",
-            "alias_names": "锦华进出口, Jinhua Import & Export",
-            "entity_type": "COMPANY",
-            "list_type": "PBOC",
-            "risk_level": "MEDIUM",
-            "id_number": "913100000000001122",
-            "country": "中国",
-            "sanction_reason": "涉及虚假贸易背景的跨境汇款，涉嫌资本外逃",
-            "effective_date": date(2023, 2, 14),
-        },
-        {
-            "entity_name": "赵建国",
-            "alias_names": "老赵, ZHAO Jianguo, Jack Zhao",
-            "entity_type": "PERSON",
-            "list_type": "PBOC",
-            "risk_level": "HIGH",
-            "id_number": "110105196503012345",
-            "country": "中国",
-            "sanction_reason": "地下钱庄主要操作人，涉及多起跨境非法资金转移案件",
-            "effective_date": date(2023, 6, 30),
-        },
-
-        # ========================================
-        #  INTERNAL 内部黑名单
-        # ========================================
-        {
-            "entity_name": "深圳市丰达电子有限公司",
-            "alias_names": "丰达电子, Fengda Electronics",
-            "entity_type": "COMPANY",
-            "list_type": "INTERNAL",
-            "risk_level": "HIGH",
-            "id_number": "914403000000054321",
-            "country": "中国",
-            "sanction_reason": "历史交易中多次出现退单和拒付，涉嫌欺诈行为",
-            "effective_date": date(2022, 3, 10),
-        },
-        {
-            "entity_name": "陈伟强",
-            "alias_names": "阿强, CHEN Weiqiang",
-            "entity_type": "PERSON",
-            "list_type": "INTERNAL",
-            "risk_level": "HIGH",
-            "id_number": "440301199002019999",
-            "country": "中国",
-            "sanction_reason": "多次提供虚假KYC材料，涉及多平台欺诈注册",
-            "effective_date": date(2022, 7, 15),
-        },
-        {
-            "entity_name": "北京华远科技有限公司",
-            "alias_names": "华远科技, Huayuan Technology",
-            "entity_type": "COMPANY",
-            "list_type": "INTERNAL",
-            "risk_level": "MEDIUM",
-            "id_number": "911100000000009999",
-            "country": "中国",
-            "sanction_reason": "存在异常高频交易模式，疑似资金中转账户",
-            "effective_date": date(2023, 1, 20),
-        },
-        {
-            "entity_name": "王晓明",
-            "alias_names": "小王, WANG Xiaoming",
-            "entity_type": "PERSON",
-            "list_type": "INTERNAL",
-            "risk_level": "MEDIUM",
-            "id_number": "320105198808081234",
-            "country": "中国",
-            "sanction_reason": "与多个高风险账户存在关联交易，疑似参与洗钱网络",
-            "effective_date": date(2023, 5, 8),
-        },
-        {
-            "entity_name": "杭州聚鑫贸易有限公司",
-            "alias_names": "聚鑫贸易, Juxin Trading",
-            "entity_type": "COMPANY",
-            "list_type": "INTERNAL",
-            "risk_level": "LOW",
-            "id_number": "913301000000006666",
-            "country": "中国",
-            "sanction_reason": "交易模式异常，需持续监控",
-            "effective_date": date(2023, 8, 12),
-        },
-        {
-            "entity_name": "刘芳",
-            "alias_names": "小芳, LIU Fang, Lisa Liu",
-            "entity_type": "PERSON",
-            "list_type": "INTERNAL",
-            "risk_level": "LOW",
-            "id_number": "330102199512016789",
-            "country": "中国",
-            "sanction_reason": "账户存在多次小额分散转入集中转出特征，需持续观察",
-            "effective_date": date(2024, 1, 5),
-        },
     ]
 
 
 class Command(BaseCommand):
-    help = "导入 OFAC / UN / EU / MPS / PBOC / INTERNAL 制裁名单样本数据"
+    help = "导入 OFAC / UN 制裁名单（官方源限量 或 离线样本）"
 
     def add_arguments(self, parser):
         parser.add_argument(
+            "--from-official",
+            action="store_true",
+            help="从 OFAC SDN 与联合国官方 XML 各下载少量真实记录",
+        )
+        parser.add_argument(
+            "--use-sample",
+            action="store_true",
+            help="使用内置硬编码样本（离线回退，默认行为）",
+        )
+        parser.add_argument(
+            "--limit",
+            type=int,
+            default=30,
+            metavar="N",
+            help="每个名单来源最多导入条数（仅 --from-official，默认 30）",
+        )
+        parser.add_argument(
             "--reset",
             action="store_true",
-            help="先清空现有制裁名单数据再导入",
+            help="先清空现有制裁名单及命中明细再导入（不影响商户/订单）",
+        )
+        parser.add_argument(
+            "--dry-run",
+            action="store_true",
+            help="只下载/解析，不写入数据库",
         )
 
     def handle(self, *args, **options):
-        if options["reset"]:
-            deleted, _ = SanctionList.objects.all().delete()
-            self.stdout.write(f"已清空 {deleted} 条制裁名单数据")
+        if options["from_official"]:
+            self._import_official(options)
+            return
+        self._import_sample(options)
+
+    def _clear_sanction_tables(self):
+        from apps.compliance.models import SanctionHitDetail
+
+        hit_deleted, _ = SanctionHitDetail.objects.all().delete()
+        deleted, _ = SanctionList.objects.all().delete()
+        self.stdout.write(
+            f"已清空命中明细 {hit_deleted} 条, 制裁名单 {deleted} 条"
+        )
+
+    def _safe_text(self, text) -> str:
+        raw = "" if text is None else str(text)
+        encoding = getattr(self.stdout, "encoding", None) or "utf-8"
+        return raw.encode(encoding, errors="replace").decode(encoding, errors="replace")
+
+    def _print_totals(self):
+        total = SanctionList.objects.count()
+        active = SanctionList.objects.filter(is_active=True).count()
+        high_risk = SanctionList.objects.filter(risk_level="HIGH", is_active=True).count()
+        ofac = SanctionList.objects.filter(list_type="OFAC").count()
+        un = SanctionList.objects.filter(list_type="UN").count()
+        self.stdout.write(
+            f"  总计: {total} 条 | 有效: {active} 条 | 高风险: {high_risk} 条"
+        )
+        self.stdout.write(f"  OFAC: {ofac} 条 | UN: {un} 条")
+
+    def _import_sample(self, options):
+        if options["reset"] and not options["dry_run"]:
+            self._clear_sanction_tables()
 
         data = get_data()
+        if options["dry_run"]:
+            self.stdout.write(self.style.WARNING("预览模式 — 不写入数据库"))
+            self.stdout.write(f"样本条数: {len(data)}")
+            return
+
         created = 0
         skipped = 0
-
         for item in data:
             entity_name = item["entity_name"]
             list_type = item["list_type"]
-            # 检查是否已存在同名+同名单类型的记录
             if SanctionList.objects.filter(
                 entity_name=entity_name, list_type=list_type
             ).exists():
@@ -488,10 +341,82 @@ class Command(BaseCommand):
                 f"制裁名单导入完成: 新增 {created} 条, 跳过(已存在) {skipped} 条"
             )
         )
+        self._print_totals()
 
-        # 统计汇总
-        total = SanctionList.objects.count()
-        active = SanctionList.objects.filter(is_active=True).count()
-        high_risk = SanctionList.objects.filter(risk_level="HIGH", is_active=True).count()
+    def _import_official(self, options):
+        from apps.compliance.management.commands.import_ofac_sdn import (
+            download_sdn_csv,
+            decode_sdn_bytes,
+            parse_sdn_csv_text,
+        )
+        from apps.compliance.management.commands.import_un_sanctions import (
+            download_un_xml,
+            parse_un_xml,
+            write_un_records,
+        )
 
-        self.stdout.write(f"  总计: {total} 条 | 有效: {active} 条 | 高风险: {high_risk} 条")
+        limit = options["limit"] or 30
+        dry_run = options["dry_run"]
+        ofac_entries = []
+        un_records = []
+
+        self.stdout.write(self.style.MIGRATE_HEADING(
+            f"\n从官方源导入测试数据（每源最多 {limit} 条）"
+        ))
+
+        try:
+            self.stdout.write("下载 OFAC SDN.CSV ...")
+            csv_data = download_sdn_csv()
+            ofac_entries = parse_sdn_csv_text(decode_sdn_bytes(csv_data), limit)
+            self.stdout.write(self.style.SUCCESS(
+                f"  OFAC 解析完成: {len(ofac_entries)} 条"
+            ))
+        except Exception as exc:
+            self.stderr.write(self.style.ERROR(f"  OFAC 下载/解析失败: {exc}"))
+
+        try:
+            self.stdout.write("下载联合国 consolidated.xml ...")
+            xml_bytes = download_un_xml()
+            un_records = parse_un_xml(xml_bytes, max_entries=limit)
+            self.stdout.write(self.style.SUCCESS(
+                f"  UN 解析完成: {len(un_records)} 条"
+            ))
+        except Exception as exc:
+            self.stderr.write(self.style.ERROR(f"  UN 下载/解析失败: {exc}"))
+
+        if not ofac_entries and not un_records:
+            raise CommandError(
+                "官方源均不可用。可用 python manage.py import_sanctions --use-sample 导入离线样本。"
+            )
+
+        if dry_run:
+            self.stdout.write(self.style.WARNING("\n预览模式 — 不写入数据库"))
+            for entry in ofac_entries[:5]:
+                self.stdout.write(
+                    f"  [OFAC/{entry.entity_type}] "
+                    f"{self._safe_text(entry.entity_name)} "
+                    f"({self._safe_text(entry.country)})"
+                )
+            for rec in un_records[:5]:
+                self.stdout.write(
+                    f"  [UN/{rec['entity_type']}] "
+                    f"{self._safe_text(rec['entity_name'])} "
+                    f"({self._safe_text(rec.get('country', ''))})"
+                )
+            return
+
+        if options["reset"]:
+            self._clear_sanction_tables()
+
+        if ofac_entries:
+            created = SanctionList.objects.bulk_create(
+                ofac_entries, ignore_conflicts=True, batch_size=200
+            )
+            self.stdout.write(f"  写入 OFAC: {len(created)} 条")
+
+        if un_records:
+            created, skipped = write_un_records(un_records)
+            self.stdout.write(f"  写入 UN: 新增 {created} 条, 跳过 {skipped} 条")
+
+        self.stdout.write(self.style.SUCCESS("\n官方制裁名单导入完成"))
+        self._print_totals()

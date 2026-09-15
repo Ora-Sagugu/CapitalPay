@@ -1,8 +1,8 @@
 """清结算 — API Views (运营管理端)。"""
 from datetime import datetime
+from decimal import Decimal, ROUND_HALF_UP
 
 from django.db.models import Sum, Q
-from django.http import HttpResponse
 from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 from rest_framework import viewsets, status
@@ -11,16 +11,27 @@ from rest_framework.response import Response
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework.filters import SearchFilter, OrderingFilter
 
-from apps.rbac.permissions import require_permission
+from apps.rbac.permissions import RequiresFeature
+from apps.rbac.authentication import JWTAuthentication
+from apps.core.excel_export import workbook_response
 from .models import SettlementBatch, SettlementDetail, FeeShare, DifferenceWriteOff
 from .serializers import (
     SettlementBatchSerializer, SettlementDetailSerializer,
     FeeShareSerializer, DifferenceWriteOffSerializer,
 )
 
+_MONEY = Decimal("0.01")
 
-class SettlementBatchViewSet(viewsets.ReadOnlyModelViewSet):
+
+def _money_str(value) -> str:
+    n = Decimal(str(value or 0))
+    return format(n.quantize(_MONEY, rounding=ROUND_HALF_UP), "f")
+
+
+class SettlementBatchViewSet(RequiresFeature, viewsets.ReadOnlyModelViewSet):
     """清算批次查询 — 运营管理端。"""
+    authentication_classes = [JWTAuthentication]
+    feature_code = "feature:reports"
     queryset = SettlementBatch.objects.filter(
         is_deleted=False
     ).select_related("merchant")
@@ -31,13 +42,12 @@ class SettlementBatchViewSet(viewsets.ReadOnlyModelViewSet):
     ordering_fields = ["settle_date", "settle_net_amount", "total_amount"]
 
     @action(detail=True, methods=["post"], url_path="approve")
-    @require_permission("settlement:approve")
     def approve(self, request, pk=None):
         """审批清算批次 — PENDING → 触发资金划拨。"""
         from .engine.distributor import FundsDistributor
         batch = self.get_object()
         if batch.status != SettlementBatch.SettleStatus.PENDING:
-            return Response({"detail": "仅待清算批次可审批"}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"detail": "Only a pending settlement batch may be approved"}, status=status.HTTP_400_BAD_REQUEST)
         distributor = FundsDistributor()
         batch = distributor.distribute(batch)
         return Response(SettlementBatchSerializer(batch).data)
@@ -62,20 +72,11 @@ class SettlementBatchViewSet(viewsets.ReadOnlyModelViewSet):
             ws.cell(row=i + 1, column=4, value=float(d.fee))
             ws.cell(row=i + 1, column=5, value=float(d.settle_amount))
 
-        from io import BytesIO
-        output = BytesIO()
-        wb.save(output)
-        output.seek(0)
-        filename = f"settle_batch_{batch.batch_no}.xlsx"
-        response = HttpResponse(
-            output.getvalue(),
-            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
-        response["Content-Disposition"] = f'attachment; filename="{filename}"'
-        return response
+        return workbook_response(wb, f"settle_batch_{batch.batch_no}.xlsx")
 
 
-class SettlementDetailViewSet(viewsets.ReadOnlyModelViewSet):
+class SettlementDetailViewSet(RequiresFeature, viewsets.ReadOnlyModelViewSet):
+    feature_code = "feature:reports"
     """清算明细查询 — 运营管理端。"""
     queryset = SettlementDetail.objects.filter(
         is_deleted=False
@@ -87,7 +88,8 @@ class SettlementDetailViewSet(viewsets.ReadOnlyModelViewSet):
     ordering_fields = ["amount", "fee", "settle_amount", "created_at"]
 
 
-class FeeShareViewSet(viewsets.ReadOnlyModelViewSet):
+class FeeShareViewSet(RequiresFeature, viewsets.ReadOnlyModelViewSet):
+    feature_code = "feature:agent_fees"
     """手续费分润查询 — 分润结算管理核心 API。"""
     queryset = FeeShare.objects.filter(
         is_deleted=False
@@ -124,7 +126,7 @@ class FeeShareViewSet(viewsets.ReadOnlyModelViewSet):
             )
         return qs
 
-    @action(detail=False, methods=["post"], url_path="stats")
+    @action(detail=False, methods=["get", "post"], url_path="stats")
     def stats(self, request):
         """分润汇总统计。
 
@@ -162,11 +164,11 @@ class FeeShareViewSet(viewsets.ReadOnlyModelViewSet):
         )
         return Response({
             "total_orders": qs.count(),
-            "total_amount": str(aggregates["total_amount"] or 0),
-            "total_fee": str(aggregates["total_fee"] or 0),
-            "total_channel_fee": str(aggregates["total_channel_fee"] or 0),
-            "total_platform_fee": str(aggregates["total_platform_fee"] or 0),
-            "total_agent_fee": str(aggregates["total_agent_fee"] or 0),
+            "total_amount": _money_str(aggregates["total_amount"]),
+            "total_fee": _money_str(aggregates["total_fee"]),
+            "total_channel_fee": _money_str(aggregates["total_channel_fee"]),
+            "total_platform_fee": _money_str(aggregates["total_platform_fee"]),
+            "total_agent_fee": _money_str(aggregates["total_agent_fee"]),
         })
 
     @action(detail=False, methods=["post"], url_path="export")
@@ -305,22 +307,16 @@ class FeeShareViewSet(viewsets.ReadOnlyModelViewSet):
         # ── 冻结窗格 ──
         ws.freeze_panes = ws.cell(row=header_row + 1, column=1)
 
-        # ── 输出 ──
-        from io import BytesIO
-        output = BytesIO()
-        wb.save(output)
-        output.seek(0)
-
         filename = f"profit_share_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-        response = HttpResponse(
-            output.getvalue(),
-            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
-        response["Content-Disposition"] = f'attachment; filename="{filename}"'
-        return response
+        return workbook_response(wb, filename)
 
 
-class DifferenceWriteOffViewSet(viewsets.ModelViewSet):
+class DifferenceWriteOffViewSet(RequiresFeature, viewsets.ModelViewSet):
+    feature_code = "feature:adjustments"
+    ACTION_FEATURES = {
+        "approve": "feature:adjustments.approve",
+        "write_off": "feature:adjustments.approve",
+    }
     """差异代销账管理 — 运营管理端。"""
     queryset = DifferenceWriteOff.objects.filter(is_deleted=False).select_related("merchant")
     serializer_class = DifferenceWriteOffSerializer
@@ -329,17 +325,43 @@ class DifferenceWriteOffViewSet(viewsets.ModelViewSet):
     filterset_fields = ["merchant__merchant_no", "status"]
     search_fields = ["write_off_no", "reason", "applied_by"]
 
+    def perform_create(self, serializer):
+        from apps.core.utils import generate_batch_no
+        serializer.save(
+            write_off_no=generate_batch_no("WOF"),
+            applied_by=serializer.validated_data.get("applied_by") or "admin",
+        )
+
     @action(detail=True, methods=["post"], url_path="approve")
     def approve(self, request, write_off_no=None):
         """审批差异代销账申请。"""
         from django.utils import timezone
         write_off = self.get_object()
         if write_off.status != DifferenceWriteOff.WriteOffStatus.PENDING:
-            return Response({"message": "状态不可审批"}, status=400)
+            return Response({"message": "The current status does not permit approval"}, status=400)
 
         approved_by = request.data.get("approved_by", "system")
         write_off.status = DifferenceWriteOff.WriteOffStatus.APPROVED
         write_off.approved_by = approved_by
         write_off.approved_at = timezone.now()
         write_off.save()
-        return Response({"message": "审批通过"})
+        return Response({"message": "Authorisation recorded"})
+
+    @action(detail=True, methods=["post"], url_path="write-off")
+    def write_off(self, request, write_off_no=None):
+        """核销入账。"""
+        from decimal import Decimal
+        from apps.account.models import NostroAccount
+        from apps.account.services import AccountService
+
+        write_off = self.get_object()
+        if write_off.status != DifferenceWriteOff.WriteOffStatus.APPROVED:
+            return Response({"message": "Only an approved record may be written off"}, status=400)
+        account = NostroAccount.objects.filter(
+            merchant=write_off.merchant, is_deleted=False
+        ).first()
+        if account:
+            AccountService().update_balance(account, Decimal(str(write_off.amount)), is_credit=True)
+        write_off.status = DifferenceWriteOff.WriteOffStatus.WRITTEN_OFF
+        write_off.save(update_fields=["status", "updated_at"])
+        return Response({"message": "The write-off has been posted"})

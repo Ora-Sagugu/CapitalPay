@@ -4,7 +4,8 @@ from django.db.models import Sum, Count, Q
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
-from rest_framework.permissions import AllowAny
+from rest_framework.permissions import IsAuthenticated
+from apps.rbac.permissions import RequiresFeature
 from .services import RoutingService
 from .serializers import (
     BankChannelSerializer, BankChannelListSerializer, BankChannelCreateUpdateSerializer,
@@ -13,9 +14,10 @@ from .serializers import (
 from .models import BankChannel, RoutingRule, RoutingLog, BankTransaction
 
 
-class BankChannelViewSet(viewsets.ViewSet):
+class BankChannelViewSet(RequiresFeature, viewsets.ViewSet):
     """银行通道管理"""
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
+    feature_code = "feature:banks"
 
     def list(self, request):
         status_param = request.query_params.get("status")
@@ -127,19 +129,20 @@ class BankChannelViewSet(viewsets.ViewSet):
             channel.status = BankChannel.Status.ACTIVE
         else:
             return Response(
-                {"detail": f"当前状态 {channel.status} 不支持快速切换"},
+                {"detail": f"The current status {channel.status} does not permit a rapid status toggle"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         channel.save(update_fields=["status", "updated_at"])
         return Response({
-            "message": "状态已切换",
+            "message": "The channel status has been switched",
             "status": channel.status,
         })
 
 
-class RoutingRuleViewSet(viewsets.ViewSet):
+class RoutingRuleViewSet(RequiresFeature, viewsets.ViewSet):
     """路由规则管理"""
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
+    feature_code = "feature:banks"
 
     def list(self, request):
         status_param = request.query_params.get("status")
@@ -192,9 +195,10 @@ class RoutingRuleViewSet(viewsets.ViewSet):
         return Response({"detail": "No available channel"}, status=status.HTTP_404_NOT_FOUND)
 
 
-class RoutingLogViewSet(viewsets.ViewSet):
+class RoutingLogViewSet(RequiresFeature, viewsets.ViewSet):
+    feature_code = "feature:banks"
     """路由日志"""
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     def list(self, request):
         order_no = request.query_params.get("order_no")

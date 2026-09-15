@@ -21,7 +21,7 @@ class DiffHandler:
         """处理单个差异记录。"""
         if diff.resolution != ReconciliationDiff.ResolutionType.PENDING:
             from apps.core.exceptions import BusinessException
-            raise BusinessException("DIFF_ALREADY_RESOLVED", "该差异已处理")
+            raise BusinessException("DIFF_ALREADY_RESOLVED", "This discrepancy has already been resolved")
 
         # 先执行侧效，成功后再落库 resolution，避免银行失败仍标记已处理
         if resolution == ReconciliationDiff.ResolutionType.ADJUST_PLATFORM:

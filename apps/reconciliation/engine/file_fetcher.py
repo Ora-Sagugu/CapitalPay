@@ -49,18 +49,39 @@ class BankFileFetcher:
         raise NotImplementedError("API recon fetch adapter not implemented")
 
     def _generate_mock_statement(self, filepath: str, bank_code: str, recon_date: date):
-        """生成模拟对账文件（仅 MOCK 模式）。"""
+        """生成模拟对账文件（仅 MOCK 模式），尽量带上当日真实 UIN。"""
+        from apps.payment.models import PaymentOrder
+
+        orders = list(
+            PaymentOrder.objects.filter(
+                is_deleted=False,
+                created_at__date=recon_date,
+            ).exclude(status__in=["CLOSED"])[:20]
+        )
         with open(filepath, "w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
             writer.writerow(["txn_id", "amount", "txn_time", "type", "remark"])
-            for i in range(1, 11):
-                txn_time = datetime(
-                    recon_date.year, recon_date.month, recon_date.day, 10, i * 5, 0
-                )
-                writer.writerow([
-                    f"MOCK_TXN_{i:06d}",
-                    f"{i * 1000:.2f}",
-                    txn_time.strftime("%Y-%m-%d %H:%M:%S"),
-                    "CREDIT",
-                    f"UIN{int(txn_time.timestamp() * 1000)}{i:04d}",
-                ])
+            if orders:
+                for i, order in enumerate(orders, 1):
+                    txn_time = order.created_at or datetime(
+                        recon_date.year, recon_date.month, recon_date.day, 10, i, 0
+                    )
+                    writer.writerow([
+                        f"MOCK_TXN_{order.order_no}",
+                        f"{order.amount:.2f}",
+                        txn_time.strftime("%Y-%m-%d %H:%M:%S"),
+                        "CREDIT",
+                        order.unique_identification_no or order.prn_code or "",
+                    ])
+            else:
+                for i in range(1, 6):
+                    txn_time = datetime(
+                        recon_date.year, recon_date.month, recon_date.day, 10, i * 5, 0
+                    )
+                    writer.writerow([
+                        f"MOCK_TXN_{i:06d}",
+                        f"{i * 1000:.2f}",
+                        txn_time.strftime("%Y-%m-%d %H:%M:%S"),
+                        "CREDIT",
+                        f"UIN{int(txn_time.timestamp() * 1000)}{i:04d}",
+                    ])

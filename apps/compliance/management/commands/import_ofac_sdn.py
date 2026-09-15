@@ -34,17 +34,28 @@
 import csv
 import io
 import re
-import ssl
 from datetime import date
 from django.core.management.base import BaseCommand, CommandError
 from apps.compliance.models import SanctionList
 
+OFAC_SDN_URLS = [
+    "https://www.treasury.gov/ofac/downloads/sdn.csv",
+    "https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/SDN.CSV",
+]
+DOWNLOAD_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/csv,text/plain,*/*",
+}
+
 # ── SDN Type → 内部 Entity Type 映射 ──
 TYPE_MAP = {
-    "individual": "PERSON",
-    "entity": "COMPANY",
-    "vessel": "VESSEL",
-    "aircraft": "OTHER",
+    "individual": "INDIVIDUAL",
+    "entity": "ORGANIZATION",
+    "vessel": "ENTITY",
+    "aircraft": "ENTITY",
 }
 
 # ── 从 Remarks 中提取国家信息 ──
@@ -98,74 +109,136 @@ def extract_id_number(remarks: str) -> str:
     return ""
 
 
-def parse_sdn_csv(filepath: str, max_entries: int = 500,
-                  programs: set = None) -> list:
-    """解析 OFAC SDN.CSV 文件，返回 SanctionList 对象列表"""
-    entries = []
-    seen = set()
+def _ofac_blank(value: str) -> bool:
+    text = (value or "").strip()
+    return (not text) or text == "-0-"
 
-    with open(filepath, "r", encoding="utf-8", errors="replace") as f:
-        reader = csv.reader(f)
-        header = next(reader, None)  # skip header
 
-        for row in reader:
-            if len(row) < 4:
-                continue
+def decode_sdn_bytes(raw: bytes) -> str:
+    for encoding in ("utf-8-sig", "utf-8", "latin-1"):
+        try:
+            return raw.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("utf-8", errors="replace")
 
-            ent_num = row[0].strip()
-            sdn_name = row[1].strip()
-            sdn_type = row[2].strip().lower()
-            program_raw = row[3].strip() if len(row) > 3 else ""
-            remarks = row[11].strip() if len(row) > 11 else ""
 
-            if not sdn_name:
-                continue
+def _csv_is_header(row) -> bool:
+    if not row:
+        return True
+    first = row[0].strip().lower().replace(" ", "").replace("_", "")
+    if first in ("entnum", "uid"):
+        return True
+    return not first.lstrip("-").isdigit()
 
-            # 项目过滤
-            if programs:
-                row_progs = set(p.strip() for p in program_raw.split(";") if p.strip())
-                if not row_progs & programs:
-                    continue
 
-            # 去重（按名称+实体编号）
-            key = (sdn_name.lower(), ent_num)
-            if key in seen:
-                continue
-            seen.add(key)
+def _stratified_sample(buckets: dict, max_entries: int) -> list:
+    order = ["INDIVIDUAL", "ORGANIZATION", "ENTITY", "COUNTRY", "REGION"]
+    ratios = {"INDIVIDUAL": 0.40, "ORGANIZATION": 0.40, "ENTITY": 0.20, "COUNTRY": 0.0, "REGION": 0.0}
+    quotas = {key: int(max_entries * ratios[key]) for key in order}
+    quotas["INDIVIDUAL"] += max_entries - sum(quotas.values())
 
-            entity_type = TYPE_MAP.get(sdn_type, "OTHER")
-            country = extract_country(remarks)
-            id_num = extract_id_number(remarks)
+    picked = []
+    remaining = {}
+    leftover = 0
+    for key in order:
+        pool = buckets.get(key) or []
+        take = min(len(pool), max(0, quotas[key]))
+        picked.extend(pool[:take])
+        remaining[key] = pool[take:]
+        leftover += quotas[key] - take
 
-            entries.append(SanctionList(
-                entity_name=sdn_name,
-                entity_type=entity_type,
-                list_type="OFAC",
-                risk_level="HIGH",
-                id_number=id_num,
-                country=country,
-                sanction_reason=program_raw[:500] if program_raw else "",
-                effective_date=date.today(),
-                is_active=True,
-            ))
-
-            if max_entries and len(entries) >= max_entries:
+    while leftover > 0 and any(remaining.values()):
+        progressed = False
+        for key in order:
+            if leftover <= 0:
                 break
+            if remaining[key]:
+                picked.append(remaining[key].pop(0))
+                leftover -= 1
+                progressed = True
+        if not progressed:
+            break
+    return picked[:max_entries]
 
-    return entries
+
+def parse_sdn_csv_text(text: str, max_entries: int = 500, programs: set = None) -> list:
+    """Parse SDN.CSV text into SanctionList objects with optional type mix."""
+    reader = csv.reader(io.StringIO(text))
+    first = next(reader, None)
+    rows = []
+    if first and not _csv_is_header(first):
+        rows.append(first)
+    rows.extend(reader)
+
+    buckets = {"INDIVIDUAL": [], "ORGANIZATION": [], "ENTITY": [], "COUNTRY": [], "REGION": []}
+    seen = set()
+    for row in rows:
+        if len(row) < 4:
+            continue
+        ent_num = row[0].strip()
+        sdn_name = "" if _ofac_blank(row[1]) else row[1].strip()
+        sdn_type = "entity" if _ofac_blank(row[2]) else row[2].strip().lower()
+        program_raw = "" if _ofac_blank(row[3]) else row[3].strip()
+        vess_flag = "" if len(row) <= 9 or _ofac_blank(row[9]) else row[9].strip()
+        remarks = "" if len(row) <= 11 or _ofac_blank(row[11]) else row[11].strip()
+        if not sdn_name:
+            continue
+        if programs:
+            row_progs = {p.strip() for p in program_raw.split(";") if p.strip()}
+            if not row_progs & programs:
+                continue
+        key = (sdn_name.lower(), ent_num)
+        if key in seen:
+            continue
+        seen.add(key)
+        entity_type = TYPE_MAP.get(sdn_type, "ENTITY")
+        country = extract_country(remarks) or vess_flag
+        id_num = extract_id_number(remarks)
+        buckets[entity_type].append(SanctionList(
+            entity_name=sdn_name[:256],
+            entity_type=entity_type,
+            list_type="OFAC",
+            risk_level="HIGH",
+            reference_id=ent_num[:32],
+            id_number=id_num,
+            country=(country or "")[:64],
+            sanction_reason=(program_raw or "SDN")[:500],
+            effective_date=date.today(),
+            is_active=True,
+        ))
+
+    if not max_entries:
+        return [item for key in ("INDIVIDUAL", "ORGANIZATION", "ENTITY", "COUNTRY", "REGION") for item in buckets[key]]
+    return _stratified_sample(buckets, max_entries)
+
+
+def parse_sdn_csv(filepath: str, max_entries: int = 500, programs: set = None) -> list:
+    """解析 OFAC SDN.CSV 文件，返回 SanctionList 对象列表"""
+    with open(filepath, "rb") as handle:
+        return parse_sdn_csv_text(decode_sdn_bytes(handle.read()), max_entries, programs)
 
 
 def download_sdn_csv(timeout: int = 120) -> bytes:
-    """从 OFAC 官网下载 SDN.CSV"""
-    import urllib.request
+    """从 OFAC 官网（含备用地址）下载 SDN.CSV"""
+    import requests
 
-    ssl._create_default_https_context = ssl._create_unverified_context
-    url = "https://www.treasury.gov/ofac/downloads/sdn.csv"
-    req = urllib.request.Request(url, headers={
-        "User-Agent": "B2BPaymentSystem/1.0 (Compliance Module)",
-    })
-    resp = urllib.request.urlopen(req, timeout=timeout)
-    return resp.read()
+    errors = []
+    for url in OFAC_SDN_URLS:
+        try:
+            resp = requests.get(
+                url,
+                headers=DOWNLOAD_HEADERS,
+                timeout=timeout,
+                allow_redirects=True,
+            )
+            resp.raise_for_status()
+            if len(resp.content) < 200:
+                raise ValueError("empty response")
+            return resp.content
+        except Exception as exc:
+            errors.append(f"{url}: {exc}")
+    raise RuntimeError("All OFAC URLs failed: " + " | ".join(errors))
 
 
 # ═══════════════════════════════════════════════════════════
@@ -177,442 +250,442 @@ def download_sdn_csv(timeout: int = 120) -> bytes:
 BUILTIN_OFAC_DATA = [
     # ============ IRAN 制裁项目 - 个人 ============
     # 伊朗革命卫队及相关个人
-    {"entity_name": "QASEM SOLEIMANI", "entity_type": "PERSON",
+    {"entity_name": "QASEM SOLEIMANI", "entity_type": "INDIVIDUAL",
      "country": "Iran", "sanction_reason": "IRAN; SDGT",
      "id_number": "A3859205 Iran"},
-    {"entity_name": "ISMAIL QAANI", "entity_type": "PERSON",
+    {"entity_name": "ISMAIL QAANI", "entity_type": "INDIVIDUAL",
      "country": "Iran", "sanction_reason": "IRAN; SDGT"},
-    {"entity_name": "ALI SHAMKHANI", "entity_type": "PERSON",
+    {"entity_name": "ALI SHAMKHANI", "entity_type": "INDIVIDUAL",
      "country": "Iran", "sanction_reason": "IRAN"},
-    {"entity_name": "MOHAMMAD JAFARI", "entity_type": "PERSON",
+    {"entity_name": "MOHAMMAD JAFARI", "entity_type": "INDIVIDUAL",
      "country": "Iran", "sanction_reason": "IRAN; SDGT"},
-    {"entity_name": "HOSSEIN SALAMI", "entity_type": "PERSON",
+    {"entity_name": "HOSSEIN SALAMI", "entity_type": "INDIVIDUAL",
      "country": "Iran", "sanction_reason": "IRAN; SDGT"},
-    {"entity_name": "GHOLAMREZA SOLEIMANI", "entity_type": "PERSON",
+    {"entity_name": "GHOLAMREZA SOLEIMANI", "entity_type": "INDIVIDUAL",
      "country": "Iran", "sanction_reason": "IRAN"},
-    {"entity_name": "ALI AKBAR AHMADIAN", "entity_type": "PERSON",
+    {"entity_name": "ALI AKBAR AHMADIAN", "entity_type": "INDIVIDUAL",
      "country": "Iran", "sanction_reason": "IRAN"},
-    {"entity_name": "ALI LARIJANI", "entity_type": "PERSON",
+    {"entity_name": "ALI LARIJANI", "entity_type": "INDIVIDUAL",
      "country": "Iran", "sanction_reason": "IRAN"},
-    {"entity_name": "MAHMOUD AHMADINEJAD", "entity_type": "PERSON",
+    {"entity_name": "MAHMOUD AHMADINEJAD", "entity_type": "INDIVIDUAL",
      "country": "Iran", "sanction_reason": "IRAN"},
-    {"entity_name": "SAEED JALILI", "entity_type": "PERSON",
+    {"entity_name": "SAEED JALILI", "entity_type": "INDIVIDUAL",
      "country": "Iran", "sanction_reason": "IRAN; SDGT"},
-    {"entity_name": "MOHAMMAD BAGHERI", "entity_type": "PERSON",
+    {"entity_name": "MOHAMMAD BAGHERI", "entity_type": "INDIVIDUAL",
      "country": "Iran", "sanction_reason": "IRAN"},
-    {"entity_name": "AMIR ALI HAJIZADEH", "entity_type": "PERSON",
+    {"entity_name": "AMIR ALI HAJIZADEH", "entity_type": "INDIVIDUAL",
      "country": "Iran", "sanction_reason": "IRAN; SDGT"},
-    {"entity_name": "ESMAIL GHANI", "entity_type": "PERSON",
+    {"entity_name": "ESMAIL GHANI", "entity_type": "INDIVIDUAL",
      "country": "Iran", "sanction_reason": "IRAN; SDGT"},
-    {"entity_name": "MOHAMMAD PAKPUR", "entity_type": "PERSON",
+    {"entity_name": "MOHAMMAD PAKPUR", "entity_type": "INDIVIDUAL",
      "country": "Iran", "sanction_reason": "IRAN"},
-    {"entity_name": "HOSSEIN DEHGHAN", "entity_type": "PERSON",
+    {"entity_name": "HOSSEIN DEHGHAN", "entity_type": "INDIVIDUAL",
      "country": "Iran", "sanction_reason": "IRAN"},
 
     # ============ IRAN 制裁项目 - 企业/实体 ============
-    {"entity_name": "ISLAMIC REVOLUTIONARY GUARD CORPS", "entity_type": "COMPANY",
+    {"entity_name": "ISLAMIC REVOLUTIONARY GUARD CORPS", "entity_type": "ORGANIZATION",
      "country": "Iran", "sanction_reason": "IRAN; SDGT"},
-    {"entity_name": "IRAN AIR", "entity_type": "COMPANY",
+    {"entity_name": "IRAN AIR", "entity_type": "ORGANIZATION",
      "country": "Iran", "sanction_reason": "IRAN"},
-    {"entity_name": "NATIONAL IRANIAN OIL COMPANY", "entity_type": "COMPANY",
+    {"entity_name": "NATIONAL IRANIAN OIL COMPANY", "entity_type": "ORGANIZATION",
      "country": "Iran", "sanction_reason": "IRAN"},
-    {"entity_name": "NATIONAL IRANIAN TANKER COMPANY", "entity_type": "COMPANY",
+    {"entity_name": "NATIONAL IRANIAN TANKER COMPANY", "entity_type": "ORGANIZATION",
      "country": "Iran", "sanction_reason": "IRAN"},
-    {"entity_name": "IRANIAN MINISTRY OF DEFENSE", "entity_type": "COMPANY",
+    {"entity_name": "IRANIAN MINISTRY OF DEFENSE", "entity_type": "ORGANIZATION",
      "country": "Iran", "sanction_reason": "IRAN"},
-    {"entity_name": "MAHAN AIR", "entity_type": "COMPANY",
+    {"entity_name": "MAHAN AIR", "entity_type": "ORGANIZATION",
      "country": "Iran", "sanction_reason": "IRAN; SDGT"},
-    {"entity_name": "PARS AVIATION SERVICES COMPANY", "entity_type": "COMPANY",
+    {"entity_name": "PARS AVIATION SERVICES COMPANY", "entity_type": "ORGANIZATION",
      "country": "Iran", "sanction_reason": "IRAN"},
-    {"entity_name": "POUYA AIR", "entity_type": "COMPANY",
+    {"entity_name": "POUYA AIR", "entity_type": "ORGANIZATION",
      "country": "Iran", "sanction_reason": "IRAN"},
-    {"entity_name": "MERAJ AIRLINES", "entity_type": "COMPANY",
+    {"entity_name": "MERAJ AIRLINES", "entity_type": "ORGANIZATION",
      "country": "Iran", "sanction_reason": "IRAN; SDGT"},
-    {"entity_name": "QESHM FREE ZONE AUTHORITY", "entity_type": "COMPANY",
+    {"entity_name": "QESHM FREE ZONE AUTHORITY", "entity_type": "ORGANIZATION",
      "country": "Iran", "sanction_reason": "IRAN"},
-    {"entity_name": "ISLAMIC REPUBLIC OF IRAN SHIPPING LINES", "entity_type": "COMPANY",
+    {"entity_name": "ISLAMIC REPUBLIC OF IRAN SHIPPING LINES", "entity_type": "ORGANIZATION",
      "country": "Iran", "sanction_reason": "IRAN; SDGT"},
-    {"entity_name": "IRAN ELECTRONICS INDUSTRIES", "entity_type": "COMPANY",
+    {"entity_name": "IRAN ELECTRONICS INDUSTRIES", "entity_type": "ORGANIZATION",
      "country": "Iran", "sanction_reason": "IRAN"},
-    {"entity_name": "SHAHID HEMAT INDUSTRIAL GROUP", "entity_type": "COMPANY",
+    {"entity_name": "SHAHID HEMAT INDUSTRIAL GROUP", "entity_type": "ORGANIZATION",
      "country": "Iran", "sanction_reason": "IRAN"},
-    {"entity_name": "ARIAN BANK", "entity_type": "COMPANY",
+    {"entity_name": "ARIAN BANK", "entity_type": "ORGANIZATION",
      "country": "Afghanistan", "sanction_reason": "IRAN"},
-    {"entity_name": "BANK SADERAT IRAN", "entity_type": "COMPANY",
+    {"entity_name": "BANK SADERAT IRAN", "entity_type": "ORGANIZATION",
      "country": "Iran", "sanction_reason": "IRAN; SDGT"},
-    {"entity_name": "BANK MELLI IRAN", "entity_type": "COMPANY",
+    {"entity_name": "BANK MELLI IRAN", "entity_type": "ORGANIZATION",
      "country": "Iran", "sanction_reason": "IRAN"},
-    {"entity_name": "BANK MELLAT", "entity_type": "COMPANY",
+    {"entity_name": "BANK MELLAT", "entity_type": "ORGANIZATION",
      "country": "Iran", "sanction_reason": "IRAN; SDGT"},
-    {"entity_name": "BANK TEJARAT", "entity_type": "COMPANY",
+    {"entity_name": "BANK TEJARAT", "entity_type": "ORGANIZATION",
      "country": "Iran", "sanction_reason": "IRAN"},
-    {"entity_name": "BANK OF INDUSTRY AND MINE", "entity_type": "COMPANY",
+    {"entity_name": "BANK OF INDUSTRY AND MINE", "entity_type": "ORGANIZATION",
      "country": "Iran", "sanction_reason": "IRAN"},
-    {"entity_name": "ANSAR BANK", "entity_type": "COMPANY",
+    {"entity_name": "ANSAR BANK", "entity_type": "ORGANIZATION",
      "country": "Iran", "sanction_reason": "IRAN; SDGT"},
 
     # ============ IRAN 制裁 - 船只 ============
-    {"entity_name": "ADRIAN DARYA 1", "entity_type": "VESSEL",
+    {"entity_name": "ADRIAN DARYA 1", "entity_type": "ENTITY",
      "country": "Iran", "sanction_reason": "IRAN"},
-    {"entity_name": "GRACE 1", "entity_type": "VESSEL",
+    {"entity_name": "GRACE 1", "entity_type": "ENTITY",
      "country": "Iran", "sanction_reason": "IRAN"},
-    {"entity_name": "HAPPINESS 1", "entity_type": "VESSEL",
+    {"entity_name": "HAPPINESS 1", "entity_type": "ENTITY",
      "country": "Iran", "sanction_reason": "IRAN"},
 
     # ============ CUBA 制裁项目 - 个人 ============
-    {"entity_name": "MIGUEL DIAZ-CANEL BERMUDEZ", "entity_type": "PERSON",
+    {"entity_name": "MIGUEL DIAZ-CANEL BERMUDEZ", "entity_type": "INDIVIDUAL",
      "country": "Cuba", "sanction_reason": "CUBA"},
-    {"entity_name": "RAUL CASTRO RUZ", "entity_type": "PERSON",
+    {"entity_name": "RAUL CASTRO RUZ", "entity_type": "INDIVIDUAL",
      "country": "Cuba", "sanction_reason": "CUBA"},
-    {"entity_name": "ALEJANDRO CASTRO ESPIN", "entity_type": "PERSON",
+    {"entity_name": "ALEJANDRO CASTRO ESPIN", "entity_type": "INDIVIDUAL",
      "country": "Cuba", "sanction_reason": "CUBA"},
-    {"entity_name": "LEOPOLDO CINTRA FRIAS", "entity_type": "PERSON",
+    {"entity_name": "LEOPOLDO CINTRA FRIAS", "entity_type": "INDIVIDUAL",
      "country": "Cuba", "sanction_reason": "CUBA"},
-    {"entity_name": "ALVARO LOPEZ MIERA", "entity_type": "PERSON",
+    {"entity_name": "ALVARO LOPEZ MIERA", "entity_type": "INDIVIDUAL",
      "country": "Cuba", "sanction_reason": "CUBA"},
-    {"entity_name": "LAZARO ALBERTO ALVAREZ CASAS", "entity_type": "PERSON",
+    {"entity_name": "LAZARO ALBERTO ALVAREZ CASAS", "entity_type": "INDIVIDUAL",
      "country": "Cuba", "sanction_reason": "CUBA"},
-    {"entity_name": "Ramiro Valdes Menendez", "entity_type": "PERSON",
+    {"entity_name": "Ramiro Valdes Menendez", "entity_type": "INDIVIDUAL",
      "country": "Cuba", "sanction_reason": "CUBA"},
-    {"entity_name": "JOSE AMADO RICARDO GUERRA", "entity_type": "PERSON",
+    {"entity_name": "JOSE AMADO RICARDO GUERRA", "entity_type": "INDIVIDUAL",
      "country": "Cuba", "sanction_reason": "CUBA"},
 
     # ============ CUBA - 企业 ============
-    {"entity_name": "HABANOS S.A.", "entity_type": "COMPANY",
+    {"entity_name": "HABANOS S.A.", "entity_type": "ORGANIZATION",
      "country": "Cuba", "sanction_reason": "CUBA"},
-    {"entity_name": "GRUPO DE ADMINISTRACION EMPRESARIAL S.A.", "entity_type": "COMPANY",
+    {"entity_name": "GRUPO DE ADMINISTRACION EMPRESARIAL S.A.", "entity_type": "ORGANIZATION",
      "country": "Cuba", "sanction_reason": "CUBA"},
-    {"entity_name": "CUBANA DE AVIACION S.A.", "entity_type": "COMPANY",
+    {"entity_name": "CUBANA DE AVIACION S.A.", "entity_type": "ORGANIZATION",
      "country": "Cuba", "sanction_reason": "CUBA"},
-    {"entity_name": "AEROGAVIOTA S.A.", "entity_type": "COMPANY",
+    {"entity_name": "AEROGAVIOTA S.A.", "entity_type": "ORGANIZATION",
      "country": "Cuba", "sanction_reason": "CUBA"},
-    {"entity_name": "CORPORACION CIMEX S.A.", "entity_type": "COMPANY",
+    {"entity_name": "CORPORACION CIMEX S.A.", "entity_type": "ORGANIZATION",
      "country": "Cuba", "sanction_reason": "CUBA"},
-    {"entity_name": "FINANCIERA CIMEX S.A.", "entity_type": "COMPANY",
+    {"entity_name": "FINANCIERA CIMEX S.A.", "entity_type": "ORGANIZATION",
      "country": "Cuba", "sanction_reason": "CUBA"},
-    {"entity_name": "GAVIOTA S.A.", "entity_type": "COMPANY",
+    {"entity_name": "GAVIOTA S.A.", "entity_type": "ORGANIZATION",
      "country": "Cuba", "sanction_reason": "CUBA"},
 
     # ============ NKOREA 制裁项目 - 个人 ============
-    {"entity_name": "KIM JONG UN", "entity_type": "PERSON",
+    {"entity_name": "KIM JONG UN", "entity_type": "INDIVIDUAL",
      "country": "North Korea", "sanction_reason": "NKOREA"},
-    {"entity_name": "RI PYONG CHOL", "entity_type": "PERSON",
+    {"entity_name": "RI PYONG CHOL", "entity_type": "INDIVIDUAL",
      "country": "North Korea", "sanction_reason": "NKOREA"},
-    {"entity_name": "KIM YONG CHOL", "entity_type": "PERSON",
+    {"entity_name": "KIM YONG CHOL", "entity_type": "INDIVIDUAL",
      "country": "North Korea", "sanction_reason": "NKOREA"},
-    {"entity_name": "CHOE RYONG HAE", "entity_type": "PERSON",
+    {"entity_name": "CHOE RYONG HAE", "entity_type": "INDIVIDUAL",
      "country": "North Korea", "sanction_reason": "NKOREA"},
-    {"entity_name": "RI SON GWON", "entity_type": "PERSON",
+    {"entity_name": "RI SON GWON", "entity_type": "INDIVIDUAL",
      "country": "North Korea", "sanction_reason": "NKOREA"},
-    {"entity_name": "CHOE SON HUI", "entity_type": "PERSON",
+    {"entity_name": "CHOE SON HUI", "entity_type": "INDIVIDUAL",
      "country": "North Korea", "sanction_reason": "NKOREA"},
-    {"entity_name": "PAK PONG JU", "entity_type": "PERSON",
+    {"entity_name": "PAK PONG JU", "entity_type": "INDIVIDUAL",
      "country": "North Korea", "sanction_reason": "NKOREA"},
-    {"entity_name": "KIM SU GIL", "entity_type": "PERSON",
+    {"entity_name": "KIM SU GIL", "entity_type": "INDIVIDUAL",
      "country": "North Korea", "sanction_reason": "NKOREA"},
-    {"entity_name": "O KUK RYOL", "entity_type": "PERSON",
+    {"entity_name": "O KUK RYOL", "entity_type": "INDIVIDUAL",
      "country": "North Korea", "sanction_reason": "NKOREA"},
-    {"entity_name": "KIM JONG SIK", "entity_type": "PERSON",
+    {"entity_name": "KIM JONG SIK", "entity_type": "INDIVIDUAL",
      "country": "North Korea", "sanction_reason": "NKOREA"},
-    {"entity_name": "RI HONG SOP", "entity_type": "PERSON",
+    {"entity_name": "RI HONG SOP", "entity_type": "INDIVIDUAL",
      "country": "North Korea", "sanction_reason": "NKOREA"},
 
     # ============ NKOREA - 企业 ============
-    {"entity_name": "KOREA MINING DEVELOPMENT TRADING CORPORATION", "entity_type": "COMPANY",
+    {"entity_name": "KOREA MINING DEVELOPMENT TRADING CORPORATION", "entity_type": "ORGANIZATION",
      "country": "North Korea", "sanction_reason": "NKOREA"},
-    {"entity_name": "KOREA TANGGUN TRADING CORPORATION", "entity_type": "COMPANY",
+    {"entity_name": "KOREA TANGGUN TRADING CORPORATION", "entity_type": "ORGANIZATION",
      "country": "North Korea", "sanction_reason": "NKOREA"},
-    {"entity_name": "FOREIGN TRADE BANK", "entity_type": "COMPANY",
+    {"entity_name": "FOREIGN TRADE BANK", "entity_type": "ORGANIZATION",
      "country": "North Korea", "sanction_reason": "NKOREA"},
-    {"entity_name": "KOREAN NATIONAL INSURANCE COMPANY", "entity_type": "COMPANY",
+    {"entity_name": "KOREAN NATIONAL INSURANCE COMPANY", "entity_type": "ORGANIZATION",
      "country": "North Korea", "sanction_reason": "NKOREA"},
-    {"entity_name": "AIR KORYO", "entity_type": "COMPANY",
+    {"entity_name": "AIR KORYO", "entity_type": "ORGANIZATION",
      "country": "North Korea", "sanction_reason": "NKOREA"},
-    {"entity_name": "OCEAN MARITIME MANAGEMENT COMPANY", "entity_type": "COMPANY",
+    {"entity_name": "OCEAN MARITIME MANAGEMENT COMPANY", "entity_type": "ORGANIZATION",
      "country": "North Korea", "sanction_reason": "NKOREA"},
-    {"entity_name": "KOREA DAESONG BANK", "entity_type": "COMPANY",
+    {"entity_name": "KOREA DAESONG BANK", "entity_type": "ORGANIZATION",
      "country": "North Korea", "sanction_reason": "NKOREA"},
-    {"entity_name": "KOREA KWANGSONG BANKING CORPORATION", "entity_type": "COMPANY",
+    {"entity_name": "KOREA KWANGSONG BANKING CORPORATION", "entity_type": "ORGANIZATION",
      "country": "North Korea", "sanction_reason": "NKOREA"},
-    {"entity_name": "KOREA RYONBONG GENERAL CORPORATION", "entity_type": "COMPANY",
+    {"entity_name": "KOREA RYONBONG GENERAL CORPORATION", "entity_type": "ORGANIZATION",
      "country": "North Korea", "sanction_reason": "NKOREA"},
-    {"entity_name": "SECOND ACADEMY OF NATURAL SCIENCES", "entity_type": "COMPANY",
+    {"entity_name": "SECOND ACADEMY OF NATURAL SCIENCES", "entity_type": "ORGANIZATION",
      "country": "North Korea", "sanction_reason": "NKOREA"},
 
     # ============ NKOREA - 船只 ============
-    {"entity_name": "WISE HONEST", "entity_type": "VESSEL",
+    {"entity_name": "WISE HONEST", "entity_type": "ENTITY",
      "country": "North Korea", "sanction_reason": "NKOREA"},
-    {"entity_name": "YU PHYONG 5", "entity_type": "VESSEL",
+    {"entity_name": "YU PHYONG 5", "entity_type": "ENTITY",
      "country": "North Korea", "sanction_reason": "NKOREA"},
-    {"entity_name": "JI SONG 6", "entity_type": "VESSEL",
+    {"entity_name": "JI SONG 6", "entity_type": "ENTITY",
      "country": "North Korea", "sanction_reason": "NKOREA"},
-    {"entity_name": "SAEBYOL", "entity_type": "VESSEL",
+    {"entity_name": "SAEBYOL", "entity_type": "ENTITY",
      "country": "North Korea", "sanction_reason": "NKOREA"},
-    {"entity_name": "KANG NAM 1", "entity_type": "VESSEL",
+    {"entity_name": "KANG NAM 1", "entity_type": "ENTITY",
      "country": "North Korea", "sanction_reason": "NKOREA"},
 
     # ============ SDGT 制裁项目 - 恐怖分子/组织 ============
-    {"entity_name": "AYMAN AL-ZAWAHIRI", "entity_type": "PERSON",
+    {"entity_name": "AYMAN AL-ZAWAHIRI", "entity_type": "INDIVIDUAL",
      "country": "Egypt", "sanction_reason": "SDGT"},
-    {"entity_name": "SAIF AL-ADEL", "entity_type": "PERSON",
+    {"entity_name": "SAIF AL-ADEL", "entity_type": "INDIVIDUAL",
      "country": "Egypt", "sanction_reason": "SDGT"},
-    {"entity_name": "ABU BAKR AL-BAGHDADI", "entity_type": "PERSON",
+    {"entity_name": "ABU BAKR AL-BAGHDADI", "entity_type": "INDIVIDUAL",
      "country": "Iraq", "sanction_reason": "SDGT"},
-    {"entity_name": "ABU MOHAMMAD AL-JULANI", "entity_type": "PERSON",
+    {"entity_name": "ABU MOHAMMAD AL-JULANI", "entity_type": "INDIVIDUAL",
      "country": "Syria", "sanction_reason": "SDGT"},
-    {"entity_name": "MOHAMMAD AL-JOLANI", "entity_type": "PERSON",
+    {"entity_name": "MOHAMMAD AL-JOLANI", "entity_type": "INDIVIDUAL",
      "country": "Syria", "sanction_reason": "SDGT"},
-    {"entity_name": "HASSAN NASRALLAH", "entity_type": "PERSON",
+    {"entity_name": "HASSAN NASRALLAH", "entity_type": "INDIVIDUAL",
      "country": "Lebanon", "sanction_reason": "SDGT"},
-    {"entity_name": "ISMAIL HANIYEH", "entity_type": "PERSON",
+    {"entity_name": "ISMAIL HANIYEH", "entity_type": "INDIVIDUAL",
      "country": "Palestine", "sanction_reason": "SDGT"},
-    {"entity_name": "KHALED MESHAAL", "entity_type": "PERSON",
+    {"entity_name": "KHALED MESHAAL", "entity_type": "INDIVIDUAL",
      "country": "Qatar", "sanction_reason": "SDGT"},
-    {"entity_name": "YAHYA SINWAR", "entity_type": "PERSON",
+    {"entity_name": "YAHYA SINWAR", "entity_type": "INDIVIDUAL",
      "country": "Palestine", "sanction_reason": "SDGT"},
-    {"entity_name": "MOHAMMED DEIF", "entity_type": "PERSON",
+    {"entity_name": "MOHAMMED DEIF", "entity_type": "INDIVIDUAL",
      "country": "Palestine", "sanction_reason": "SDGT"},
-    {"entity_name": "SAEED IRAVANI", "entity_type": "PERSON",
+    {"entity_name": "SAEED IRAVANI", "entity_type": "INDIVIDUAL",
      "country": "Iran", "sanction_reason": "SDGT"},
-    {"entity_name": "MOHAMMAD REZA FALAHZADEH", "entity_type": "PERSON",
+    {"entity_name": "MOHAMMAD REZA FALAHZADEH", "entity_type": "INDIVIDUAL",
      "country": "Iran", "sanction_reason": "SDGT"},
 
-    {"entity_name": "ISLAMIC STATE OF IRAQ AND THE LEVANT", "entity_type": "COMPANY",
+    {"entity_name": "ISLAMIC STATE OF IRAQ AND THE LEVANT", "entity_type": "ORGANIZATION",
      "country": "Iraq", "sanction_reason": "SDGT"},
-    {"entity_name": "HIZBALLAH", "entity_type": "COMPANY",
+    {"entity_name": "HIZBALLAH", "entity_type": "ORGANIZATION",
      "country": "Lebanon", "sanction_reason": "SDGT"},
-    {"entity_name": "AL-QAIDA", "entity_type": "COMPANY",
+    {"entity_name": "AL-QAIDA", "entity_type": "ORGANIZATION",
      "country": "Afghanistan", "sanction_reason": "SDGT"},
-    {"entity_name": "AL-NUSRAH FRONT", "entity_type": "COMPANY",
+    {"entity_name": "AL-NUSRAH FRONT", "entity_type": "ORGANIZATION",
      "country": "Syria", "sanction_reason": "SDGT"},
-    {"entity_name": "HARAKAT AL-SABIREEN", "entity_type": "COMPANY",
+    {"entity_name": "HARAKAT AL-SABIREEN", "entity_type": "ORGANIZATION",
      "country": "Palestine", "sanction_reason": "SDGT"},
-    {"entity_name": "AL-QAIDA IN THE ISLAMIC MAGHREB", "entity_type": "COMPANY",
+    {"entity_name": "AL-QAIDA IN THE ISLAMIC MAGHREB", "entity_type": "ORGANIZATION",
      "country": "Algeria", "sanction_reason": "SDGT"},
-    {"entity_name": "ISLAMIC STATE - KHORASAN PROVINCE", "entity_type": "COMPANY",
+    {"entity_name": "ISLAMIC STATE - KHORASAN PROVINCE", "entity_type": "ORGANIZATION",
      "country": "Afghanistan", "sanction_reason": "SDGT"},
-    {"entity_name": "AL-SHABAAB", "entity_type": "COMPANY",
+    {"entity_name": "AL-SHABAAB", "entity_type": "ORGANIZATION",
      "country": "Somalia", "sanction_reason": "SDGT"},
-    {"entity_name": "HARAKAT AL-MUQAWAMA AL-ISLAMIYA", "entity_type": "COMPANY",
+    {"entity_name": "HARAKAT AL-MUQAWAMA AL-ISLAMIYA", "entity_type": "ORGANIZATION",
      "country": "Palestine", "sanction_reason": "SDGT"},
-    {"entity_name": "JAYSH AL-ADL", "entity_type": "COMPANY",
+    {"entity_name": "JAYSH AL-ADL", "entity_type": "ORGANIZATION",
      "country": "Iran", "sanction_reason": "SDGT"},
 
     # ============ SYRIA 制裁项目 ============
-    {"entity_name": "BASHAR AL-ASSAD", "entity_type": "PERSON",
+    {"entity_name": "BASHAR AL-ASSAD", "entity_type": "INDIVIDUAL",
      "country": "Syria", "sanction_reason": "SYRIA"},
-    {"entity_name": "ASMA AL-ASSAD", "entity_type": "PERSON",
+    {"entity_name": "ASMA AL-ASSAD", "entity_type": "INDIVIDUAL",
      "country": "Syria", "sanction_reason": "SYRIA"},
-    {"entity_name": "MAHER AL-ASSAD", "entity_type": "PERSON",
+    {"entity_name": "MAHER AL-ASSAD", "entity_type": "INDIVIDUAL",
      "country": "Syria", "sanction_reason": "SYRIA"},
-    {"entity_name": "ALI MAMLUK", "entity_type": "PERSON",
+    {"entity_name": "ALI MAMLUK", "entity_type": "INDIVIDUAL",
      "country": "Syria", "sanction_reason": "SYRIA"},
-    {"entity_name": "WALID AL-MOUALLEM", "entity_type": "PERSON",
+    {"entity_name": "WALID AL-MOUALLEM", "entity_type": "INDIVIDUAL",
      "country": "Syria", "sanction_reason": "SYRIA"},
-    {"entity_name": "FAHD JASSEM AL-FREIJ", "entity_type": "PERSON",
+    {"entity_name": "FAHD JASSEM AL-FREIJ", "entity_type": "INDIVIDUAL",
      "country": "Syria", "sanction_reason": "SYRIA"},
-    {"entity_name": "MOHAMMED KHALED AL-RAHMOUN", "entity_type": "PERSON",
+    {"entity_name": "MOHAMMED KHALED AL-RAHMOUN", "entity_type": "INDIVIDUAL",
      "country": "Syria", "sanction_reason": "SYRIA"},
 
-    {"entity_name": "SYRIAN AIR FORCE INTELLIGENCE", "entity_type": "COMPANY",
+    {"entity_name": "SYRIAN AIR FORCE INTELLIGENCE", "entity_type": "ORGANIZATION",
      "country": "Syria", "sanction_reason": "SYRIA"},
-    {"entity_name": "SYRIAN GENERAL INTELLIGENCE DIRECTORATE", "entity_type": "COMPANY",
+    {"entity_name": "SYRIAN GENERAL INTELLIGENCE DIRECTORATE", "entity_type": "ORGANIZATION",
      "country": "Syria", "sanction_reason": "SYRIA"},
-    {"entity_name": "SYRIAN ARAB AIRLINES", "entity_type": "COMPANY",
+    {"entity_name": "SYRIAN ARAB AIRLINES", "entity_type": "ORGANIZATION",
      "country": "Syria", "sanction_reason": "SYRIA"},
-    {"entity_name": "SYRIAN PETROLEUM COMPANY", "entity_type": "COMPANY",
+    {"entity_name": "SYRIAN PETROLEUM COMPANY", "entity_type": "ORGANIZATION",
      "country": "Syria", "sanction_reason": "SYRIA"},
-    {"entity_name": "CENTRAL BANK OF SYRIA", "entity_type": "COMPANY",
+    {"entity_name": "CENTRAL BANK OF SYRIA", "entity_type": "ORGANIZATION",
      "country": "Syria", "sanction_reason": "SYRIA"},
-    {"entity_name": "COMMERCIAL BANK OF SYRIA", "entity_type": "COMPANY",
+    {"entity_name": "COMMERCIAL BANK OF SYRIA", "entity_type": "ORGANIZATION",
      "country": "Syria", "sanction_reason": "SYRIA"},
-    {"entity_name": "SYRIATEL", "entity_type": "COMPANY",
+    {"entity_name": "SYRIATEL", "entity_type": "ORGANIZATION",
      "country": "Syria", "sanction_reason": "SYRIA"},
 
     # ============ RUSSIA 制裁项目 (UKRAINE-RELATED) ============
-    {"entity_name": "VLADIMIR PUTIN", "entity_type": "PERSON",
+    {"entity_name": "VLADIMIR PUTIN", "entity_type": "INDIVIDUAL",
      "country": "Russia", "sanction_reason": "RUSSIA-EO14024"},
-    {"entity_name": "SERGEI LAVROV", "entity_type": "PERSON",
+    {"entity_name": "SERGEI LAVROV", "entity_type": "INDIVIDUAL",
      "country": "Russia", "sanction_reason": "RUSSIA-EO14024"},
-    {"entity_name": "SERGEI SHOIGU", "entity_type": "PERSON",
+    {"entity_name": "SERGEI SHOIGU", "entity_type": "INDIVIDUAL",
      "country": "Russia", "sanction_reason": "RUSSIA-EO14024"},
-    {"entity_name": "VALERY GERASIMOV", "entity_type": "PERSON",
+    {"entity_name": "VALERY GERASIMOV", "entity_type": "INDIVIDUAL",
      "country": "Russia", "sanction_reason": "RUSSIA-EO14024"},
-    {"entity_name": "NIKOLAI PATRUSHEV", "entity_type": "PERSON",
+    {"entity_name": "NIKOLAI PATRUSHEV", "entity_type": "INDIVIDUAL",
      "country": "Russia", "sanction_reason": "RUSSIA-EO14024"},
-    {"entity_name": "ALEXANDER BORTNIKOV", "entity_type": "PERSON",
+    {"entity_name": "ALEXANDER BORTNIKOV", "entity_type": "INDIVIDUAL",
      "country": "Russia", "sanction_reason": "RUSSIA-EO14024"},
-    {"entity_name": "DMITRY PESKOV", "entity_type": "PERSON",
+    {"entity_name": "DMITRY PESKOV", "entity_type": "INDIVIDUAL",
      "country": "Russia", "sanction_reason": "RUSSIA-EO14024"},
-    {"entity_name": "MARIA ZAKHAROVA", "entity_type": "PERSON",
+    {"entity_name": "MARIA ZAKHAROVA", "entity_type": "INDIVIDUAL",
      "country": "Russia", "sanction_reason": "RUSSIA-EO14024"},
-    {"entity_name": "YEVGENY PRIGOZHIN", "entity_type": "PERSON",
+    {"entity_name": "YEVGENY PRIGOZHIN", "entity_type": "INDIVIDUAL",
      "country": "Russia", "sanction_reason": "RUSSIA-EO14024"},
-    {"entity_name": "RAMZAN KADYROV", "entity_type": "PERSON",
+    {"entity_name": "RAMZAN KADYROV", "entity_type": "INDIVIDUAL",
      "country": "Russia", "sanction_reason": "RUSSIA-EO14024"},
-    {"entity_name": "DMITRY MEDVEDEV", "entity_type": "PERSON",
+    {"entity_name": "DMITRY MEDVEDEV", "entity_type": "INDIVIDUAL",
      "country": "Russia", "sanction_reason": "RUSSIA-EO14024"},
-    {"entity_name": "MIKHAIL MISHUSTIN", "entity_type": "PERSON",
+    {"entity_name": "MIKHAIL MISHUSTIN", "entity_type": "INDIVIDUAL",
      "country": "Russia", "sanction_reason": "RUSSIA-EO14024"},
-    {"entity_name": "ELVIRA NABIULLINA", "entity_type": "PERSON",
+    {"entity_name": "ELVIRA NABIULLINA", "entity_type": "INDIVIDUAL",
      "country": "Russia", "sanction_reason": "RUSSIA-EO14024"},
-    {"entity_name": "ANTON SILUANOV", "entity_type": "PERSON",
+    {"entity_name": "ANTON SILUANOV", "entity_type": "INDIVIDUAL",
      "country": "Russia", "sanction_reason": "RUSSIA-EO14024"},
-    {"entity_name": "VIKTOR ZOLOTOV", "entity_type": "PERSON",
+    {"entity_name": "VIKTOR ZOLOTOV", "entity_type": "INDIVIDUAL",
      "country": "Russia", "sanction_reason": "RUSSIA-EO14024"},
 
-    {"entity_name": "SBERBANK", "entity_type": "COMPANY",
+    {"entity_name": "SBERBANK", "entity_type": "ORGANIZATION",
      "country": "Russia", "sanction_reason": "RUSSIA-EO14024"},
-    {"entity_name": "VTB BANK", "entity_type": "COMPANY",
+    {"entity_name": "VTB BANK", "entity_type": "ORGANIZATION",
      "country": "Russia", "sanction_reason": "RUSSIA-EO14024"},
-    {"entity_name": "GAZPROMBANK", "entity_type": "COMPANY",
+    {"entity_name": "GAZPROMBANK", "entity_type": "ORGANIZATION",
      "country": "Russia", "sanction_reason": "RUSSIA-EO14024"},
-    {"entity_name": "ALFA-BANK", "entity_type": "COMPANY",
+    {"entity_name": "ALFA-BANK", "entity_type": "ORGANIZATION",
      "country": "Russia", "sanction_reason": "RUSSIA-EO14024"},
-    {"entity_name": "ROSTEC", "entity_type": "COMPANY",
+    {"entity_name": "ROSTEC", "entity_type": "ORGANIZATION",
      "country": "Russia", "sanction_reason": "RUSSIA-EO14024"},
-    {"entity_name": "GAZPROM", "entity_type": "COMPANY",
+    {"entity_name": "GAZPROM", "entity_type": "ORGANIZATION",
      "country": "Russia", "sanction_reason": "RUSSIA-EO14024"},
-    {"entity_name": "ROSNEFT", "entity_type": "COMPANY",
+    {"entity_name": "ROSNEFT", "entity_type": "ORGANIZATION",
      "country": "Russia", "sanction_reason": "RUSSIA-EO14024"},
-    {"entity_name": "TRANSNEFT", "entity_type": "COMPANY",
+    {"entity_name": "TRANSNEFT", "entity_type": "ORGANIZATION",
      "country": "Russia", "sanction_reason": "RUSSIA-EO14024"},
-    {"entity_name": "ALMAZ-ANTEY", "entity_type": "COMPANY",
+    {"entity_name": "ALMAZ-ANTEY", "entity_type": "ORGANIZATION",
      "country": "Russia", "sanction_reason": "RUSSIA-EO14024"},
-    {"entity_name": "KASPERSKY LAB", "entity_type": "COMPANY",
+    {"entity_name": "KASPERSKY LAB", "entity_type": "ORGANIZATION",
      "country": "Russia", "sanction_reason": "RUSSIA-EO14024"},
-    {"entity_name": "WAGNER GROUP", "entity_type": "COMPANY",
+    {"entity_name": "WAGNER GROUP", "entity_type": "ORGANIZATION",
      "country": "Russia", "sanction_reason": "RUSSIA-EO14024"},
-    {"entity_name": "UNITED AIRCRAFT CORPORATION", "entity_type": "COMPANY",
+    {"entity_name": "UNITED AIRCRAFT CORPORATION", "entity_type": "ORGANIZATION",
      "country": "Russia", "sanction_reason": "RUSSIA-EO14024"},
 
     # ============ VENEZUELA 制裁 ============
-    {"entity_name": "NICOLAS MADURO MOROS", "entity_type": "PERSON",
+    {"entity_name": "NICOLAS MADURO MOROS", "entity_type": "INDIVIDUAL",
      "country": "Venezuela", "sanction_reason": "VENEZUELA"},
-    {"entity_name": "DELCY RODRIGUEZ", "entity_type": "PERSON",
+    {"entity_name": "DELCY RODRIGUEZ", "entity_type": "INDIVIDUAL",
      "country": "Venezuela", "sanction_reason": "VENEZUELA"},
-    {"entity_name": "TARECK EL AISSAMI", "entity_type": "PERSON",
+    {"entity_name": "TARECK EL AISSAMI", "entity_type": "INDIVIDUAL",
      "country": "Venezuela", "sanction_reason": "VENEZUELA"},
-    {"entity_name": "VLADIMIR PADRINO LOPEZ", "entity_type": "PERSON",
+    {"entity_name": "VLADIMIR PADRINO LOPEZ", "entity_type": "INDIVIDUAL",
      "country": "Venezuela", "sanction_reason": "VENEZUELA"},
-    {"entity_name": "DIOSDADO CABELLO", "entity_type": "PERSON",
+    {"entity_name": "DIOSDADO CABELLO", "entity_type": "INDIVIDUAL",
      "country": "Venezuela", "sanction_reason": "VENEZUELA"},
-    {"entity_name": "PETROLEOS DE VENEZUELA S.A.", "entity_type": "COMPANY",
+    {"entity_name": "PETROLEOS DE VENEZUELA S.A.", "entity_type": "ORGANIZATION",
      "country": "Venezuela", "sanction_reason": "VENEZUELA"},
 
     # ============ BELARUS 制裁 ============
-    {"entity_name": "ALEXANDER LUKASHENKO", "entity_type": "PERSON",
+    {"entity_name": "ALEXANDER LUKASHENKO", "entity_type": "INDIVIDUAL",
      "country": "Belarus", "sanction_reason": "BELARUS"},
-    {"entity_name": "VICTOR LUKASHENKO", "entity_type": "PERSON",
+    {"entity_name": "VICTOR LUKASHENKO", "entity_type": "INDIVIDUAL",
      "country": "Belarus", "sanction_reason": "BELARUS"},
-    {"entity_name": "VICTOR SHEIMAN", "entity_type": "PERSON",
+    {"entity_name": "VICTOR SHEIMAN", "entity_type": "INDIVIDUAL",
      "country": "Belarus", "sanction_reason": "BELARUS"},
 
     # ============ MYANMAR/BURMA 制裁 ============
-    {"entity_name": "MIN AUNG HLAING", "entity_type": "PERSON",
+    {"entity_name": "MIN AUNG HLAING", "entity_type": "INDIVIDUAL",
      "country": "Myanmar", "sanction_reason": "BURMA"},
-    {"entity_name": "SOE WIN", "entity_type": "PERSON",
+    {"entity_name": "SOE WIN", "entity_type": "INDIVIDUAL",
      "country": "Myanmar", "sanction_reason": "BURMA"},
-    {"entity_name": "MYANMAR ECONOMIC CORPORATION", "entity_type": "COMPANY",
+    {"entity_name": "MYANMAR ECONOMIC CORPORATION", "entity_type": "ORGANIZATION",
      "country": "Myanmar", "sanction_reason": "BURMA"},
-    {"entity_name": "MYANMA OIL AND GAS ENTERPRISE", "entity_type": "COMPANY",
+    {"entity_name": "MYANMA OIL AND GAS ENTERPRISE", "entity_type": "ORGANIZATION",
      "country": "Myanmar", "sanction_reason": "BURMA"},
 
     # ============ COUNTER NARCOTICS / DRUG TRAFFICKING ============
-    {"entity_name": "JOAQUIN GUZMAN LOERA", "entity_type": "PERSON",
+    {"entity_name": "JOAQUIN GUZMAN LOERA", "entity_type": "INDIVIDUAL",
      "country": "Mexico", "sanction_reason": "SDNTK",
      "alias_names": "El Chapo"},
-    {"entity_name": "NEMESIO OSEGUERA CERVANTES", "entity_type": "PERSON",
+    {"entity_name": "NEMESIO OSEGUERA CERVANTES", "entity_type": "INDIVIDUAL",
      "country": "Mexico", "sanction_reason": "SDNTK",
      "alias_names": "El Mencho"},
-    {"entity_name": "ISMAEL ZAMBADA GARCIA", "entity_type": "PERSON",
+    {"entity_name": "ISMAEL ZAMBADA GARCIA", "entity_type": "INDIVIDUAL",
      "country": "Mexico", "sanction_reason": "SDNTK",
      "alias_names": "El Mayo"},
-    {"entity_name": "CARTEL DE JALISCO NUEVA GENERACION", "entity_type": "COMPANY",
+    {"entity_name": "CARTEL DE JALISCO NUEVA GENERACION", "entity_type": "ORGANIZATION",
      "country": "Mexico", "sanction_reason": "SDNTK"},
-    {"entity_name": "CARTEL DE SINALOA", "entity_type": "COMPANY",
+    {"entity_name": "CARTEL DE SINALOA", "entity_type": "ORGANIZATION",
      "country": "Mexico", "sanction_reason": "SDNTK"},
-    {"entity_name": "LOS ZETAS", "entity_type": "COMPANY",
+    {"entity_name": "LOS ZETAS", "entity_type": "ORGANIZATION",
      "country": "Mexico", "sanction_reason": "SDNTK"},
 
     # ============ CYBER-RELATED 制裁 ============
-    {"entity_name": "EVGENIY MIKHAILOVICH BOGACHEV", "entity_type": "PERSON",
+    {"entity_name": "EVGENIY MIKHAILOVICH BOGACHEV", "entity_type": "INDIVIDUAL",
      "country": "Russia", "sanction_reason": "CYBER2"},
-    {"entity_name": "ALEXSEY BELAN", "entity_type": "PERSON",
+    {"entity_name": "ALEXSEY BELAN", "entity_type": "INDIVIDUAL",
      "country": "Russia", "sanction_reason": "CYBER2"},
-    {"entity_name": "EVIL CORP", "entity_type": "COMPANY",
+    {"entity_name": "EVIL CORP", "entity_type": "ORGANIZATION",
      "country": "Russia", "sanction_reason": "CYBER2"},
-    {"entity_name": "LAZARUS GROUP", "entity_type": "COMPANY",
+    {"entity_name": "LAZARUS GROUP", "entity_type": "ORGANIZATION",
      "country": "North Korea", "sanction_reason": "CYBER2; NKOREA"},
-    {"entity_name": "KIM IL", "entity_type": "PERSON",
+    {"entity_name": "KIM IL", "entity_type": "INDIVIDUAL",
      "country": "North Korea", "sanction_reason": "CYBER2; NKOREA"},
-    {"entity_name": "PARK JIN HYOK", "entity_type": "PERSON",
+    {"entity_name": "PARK JIN HYOK", "entity_type": "INDIVIDUAL",
      "country": "North Korea", "sanction_reason": "CYBER2; NKOREA"},
-    {"entity_name": "JON CHANG HYOK", "entity_type": "PERSON",
+    {"entity_name": "JON CHANG HYOK", "entity_type": "INDIVIDUAL",
      "country": "North Korea", "sanction_reason": "CYBER2; NKOREA"},
 
     # ============ GLOBAL MAGNITSKY / HUMAN RIGHTS ============
-    {"entity_name": "DAN GERTLER", "entity_type": "PERSON",
+    {"entity_name": "DAN GERTLER", "entity_type": "INDIVIDUAL",
      "country": "Israel", "sanction_reason": "GLOMAG"},
-    {"entity_name": "YAHYA JAMMEH", "entity_type": "PERSON",
+    {"entity_name": "YAHYA JAMMEH", "entity_type": "INDIVIDUAL",
      "country": "Gambia", "sanction_reason": "GLOMAG"},
-    {"entity_name": "SLODOBAN TESIC", "entity_type": "PERSON",
+    {"entity_name": "SLODOBAN TESIC", "entity_type": "INDIVIDUAL",
      "country": "Serbia", "sanction_reason": "GLOMAG"},
-    {"entity_name": "JIANG CHAO", "entity_type": "PERSON",
+    {"entity_name": "JIANG CHAO", "entity_type": "INDIVIDUAL",
      "country": "China", "sanction_reason": "GLOMAG"},
-    {"entity_name": "ZHANG DALI", "entity_type": "PERSON",
+    {"entity_name": "ZHANG DALI", "entity_type": "INDIVIDUAL",
      "country": "China", "sanction_reason": "GLOMAG"},
 
     # ============ 中国相关制裁 (CHINESE MILITARY COMPANIES / NS-CMIC) ============
-    {"entity_name": "HUAWEI TECHNOLOGIES CO., LTD.", "entity_type": "COMPANY",
+    {"entity_name": "HUAWEI TECHNOLOGIES CO., LTD.", "entity_type": "ORGANIZATION",
      "country": "China", "sanction_reason": "NS-CMIC; IRAN"},
-    {"entity_name": "ZTE CORPORATION", "entity_type": "COMPANY",
+    {"entity_name": "ZTE CORPORATION", "entity_type": "ORGANIZATION",
      "country": "China", "sanction_reason": "NS-CMIC; IRAN"},
-    {"entity_name": "DAQING REFINING & CHEMICAL COMPANY", "entity_type": "COMPANY",
+    {"entity_name": "DAQING REFINING & CHEMICAL COMPANY", "entity_type": "ORGANIZATION",
      "country": "China", "sanction_reason": "IRAN"},
-    {"entity_name": "SINOPEC GROUP", "entity_type": "COMPANY",
+    {"entity_name": "SINOPEC GROUP", "entity_type": "ORGANIZATION",
      "country": "China", "sanction_reason": "NS-CMIC"},
-    {"entity_name": "CHINA NATIONAL OFFSHORE OIL CORPORATION", "entity_type": "COMPANY",
+    {"entity_name": "CHINA NATIONAL OFFSHORE OIL CORPORATION", "entity_type": "ORGANIZATION",
      "country": "China", "sanction_reason": "NS-CMIC"},
-    {"entity_name": "SEMICONDUCTOR MANUFACTURING INTERNATIONAL CORPORATION", "entity_type": "COMPANY",
+    {"entity_name": "SEMICONDUCTOR MANUFACTURING INTERNATIONAL CORPORATION", "entity_type": "ORGANIZATION",
      "country": "China", "sanction_reason": "NS-CMIC"},
-    {"entity_name": "YANGTZE MEMORY TECHNOLOGIES CO., LTD.", "entity_type": "COMPANY",
+    {"entity_name": "YANGTZE MEMORY TECHNOLOGIES CO., LTD.", "entity_type": "ORGANIZATION",
      "country": "China", "sanction_reason": "NS-CMIC"},
-    {"entity_name": "HIKVISION", "entity_type": "COMPANY",
+    {"entity_name": "HIKVISION", "entity_type": "ORGANIZATION",
      "country": "China", "sanction_reason": "NS-CMIC; GLOMAG"},
-    {"entity_name": "DAHUA TECHNOLOGY", "entity_type": "COMPANY",
+    {"entity_name": "DAHUA TECHNOLOGY", "entity_type": "ORGANIZATION",
      "country": "China", "sanction_reason": "NS-CMIC; GLOMAG"},
-    {"entity_name": "SENSETIME GROUP LIMITED", "entity_type": "COMPANY",
+    {"entity_name": "SENSETIME GROUP LIMITED", "entity_type": "ORGANIZATION",
      "country": "China", "sanction_reason": "NS-CMIC"},
-    {"entity_name": "MEGVII TECHNOLOGY", "entity_type": "COMPANY",
+    {"entity_name": "MEGVII TECHNOLOGY", "entity_type": "ORGANIZATION",
      "country": "China", "sanction_reason": "NS-CMIC"},
 
     # ============ HONG KONG-RELATED 制裁 ============
-    {"entity_name": "CARRIE LAM CHENG YUET-NGOR", "entity_type": "PERSON",
+    {"entity_name": "CARRIE LAM CHENG YUET-NGOR", "entity_type": "INDIVIDUAL",
      "country": "Hong Kong, China", "sanction_reason": "HONG KONG-EO13936"},
-    {"entity_name": "CHRIS TANG", "entity_type": "PERSON",
+    {"entity_name": "CHRIS TANG", "entity_type": "INDIVIDUAL",
      "country": "Hong Kong, China", "sanction_reason": "HONG KONG-EO13936"},
-    {"entity_name": "JOHN LEE KA-CHIU", "entity_type": "PERSON",
+    {"entity_name": "JOHN LEE KA-CHIU", "entity_type": "INDIVIDUAL",
      "country": "Hong Kong, China", "sanction_reason": "HONG KONG-EO13936"},
-    {"entity_name": "ZHENG YANXIONG", "entity_type": "PERSON",
+    {"entity_name": "ZHENG YANXIONG", "entity_type": "INDIVIDUAL",
      "country": "Hong Kong, China", "sanction_reason": "HONG KONG-EO13936"},
 
     # ============ AFGHANISTAN / TALIBAN ============
-    {"entity_name": "HAIBATULLAH AKHUNDZADA", "entity_type": "PERSON",
+    {"entity_name": "HAIBATULLAH AKHUNDZADA", "entity_type": "INDIVIDUAL",
      "country": "Afghanistan", "sanction_reason": "SDGT"},
-    {"entity_name": "ABDUL GHANI BARADAR", "entity_type": "PERSON",
+    {"entity_name": "ABDUL GHANI BARADAR", "entity_type": "INDIVIDUAL",
      "country": "Afghanistan", "sanction_reason": "SDGT"},
-    {"entity_name": "SIRAJUDDIN HAQQANI", "entity_type": "PERSON",
+    {"entity_name": "SIRAJUDDIN HAQQANI", "entity_type": "INDIVIDUAL",
      "country": "Afghanistan", "sanction_reason": "SDGT"},
-    {"entity_name": "HAQQANI NETWORK", "entity_type": "COMPANY",
+    {"entity_name": "HAQQANI NETWORK", "entity_type": "ORGANIZATION",
      "country": "Afghanistan", "sanction_reason": "SDGT"},
 
     # ============ ADDITIONAL HIGH-PROFILE ENTITIES ============
-    {"entity_name": "NORTH KOREAN SECOND ECONOMY COMMITTEE", "entity_type": "COMPANY",
+    {"entity_name": "NORTH KOREAN SECOND ECONOMY COMMITTEE", "entity_type": "ORGANIZATION",
      "country": "North Korea", "sanction_reason": "NKOREA"},
-    {"entity_name": "KOREA ATOMIC ENERGY RESEARCH INSTITUTE", "entity_type": "COMPANY",
+    {"entity_name": "KOREA ATOMIC ENERGY RESEARCH INSTITUTE", "entity_type": "ORGANIZATION",
      "country": "North Korea", "sanction_reason": "NKOREA"},
-    {"entity_name": "KIM IL SUNG UNIVERSITY", "entity_type": "COMPANY",
+    {"entity_name": "KIM IL SUNG UNIVERSITY", "entity_type": "ORGANIZATION",
      "country": "North Korea", "sanction_reason": "NKOREA"},
 ]
 
@@ -666,7 +739,7 @@ class Command(BaseCommand):
         # ── 模式 1: 从本地 CSV 文件导入 ──
         if from_file:
             self.stdout.write(self.style.MIGRATE_HEADING(
-                f"\n📄 从本地文件导入 OFAC SDN 数据: {from_file}"
+                f"\n从本地文件导入 OFAC SDN 数据: {from_file}"
             ))
             try:
                 entries = parse_sdn_csv(from_file, max_entries, programs)
@@ -678,30 +751,25 @@ class Command(BaseCommand):
         # ── 模式 2: 从 OFAC 官网下载 ──
         elif download and not use_builtin:
             self.stdout.write(self.style.MIGRATE_HEADING(
-                "\n🌐 正在从 OFAC 官网下载 SDN.CSV ..."
+                "\n正在从 OFAC 官网下载 SDN.CSV ..."
             ))
-            self.stdout.write("   URL: https://www.treasury.gov/ofac/downloads/sdn.csv")
+            self.stdout.write(f"   主地址: {OFAC_SDN_URLS[0]}")
+            self.stdout.write(f"   备用: {OFAC_SDN_URLS[1]}")
             try:
                 csv_data = download_sdn_csv(timeout=120)
                 self.stdout.write(self.style.SUCCESS(
-                    f"   ✓ 下载成功，{len(csv_data):,} bytes"
+                    f"   下载成功，{len(csv_data):,} bytes"
                 ))
-                # 用临时文件处理
-                import tempfile, os
-                tmp = tempfile.NamedTemporaryFile(mode="wb", suffix=".csv", delete=False)
-                tmp.write(csv_data)
-                tmp.close()
-                try:
-                    entries = parse_sdn_csv(tmp.name, max_entries, programs)
-                finally:
-                    os.unlink(tmp.name)
+                entries = parse_sdn_csv_text(
+                    decode_sdn_bytes(csv_data), max_entries, programs
+                )
             except Exception as e:
                 self.stdout.write(self.style.ERROR(
-                    f"   ✗ 下载失败: {e}\n"
-                    f"   请手动从以下地址下载 SDN.CSV:\n"
-                    f"   https://www.treasury.gov/ofac/downloads/sdn.csv\n"
-                    f"   然后使用 --from-file 参数导入\n"
-                    f"   或使用 --use-builtin 使用内置数据集"
+                    f"   下载失败: {e}\n"
+                    f"   请手动下载 SDN.CSV:\n"
+                    f"   {OFAC_SDN_URLS[0]}\n"
+                    f"   或 {OFAC_SDN_URLS[1]}\n"
+                    f"   然后使用 --from-file 导入，或 --use-builtin 使用内置数据集"
                 ))
                 raise CommandError("OFAC 下载不可用，请使用 --use-builtin 或手动下载")
 
@@ -709,10 +777,10 @@ class Command(BaseCommand):
         else:
             if download:
                 self.stdout.write(self.style.WARNING(
-                    "⚠ --download 不可用，回退到内置数据集"
+                    "--download 不可用，回退到内置数据集"
                 ))
             self.stdout.write(self.style.MIGRATE_HEADING(
-                f"\n📦 使用内置 OFAC SDN 数据集"
+                f"\n使用内置 OFAC SDN 数据集"
             ))
             self.stdout.write(f"   包含 {len(BUILTIN_OFAC_DATA)} 条基于公开制裁信息的真实数据记录")
             if programs:
@@ -735,15 +803,15 @@ class Command(BaseCommand):
 
         # ── 批量写入数据库 ──
         if not entries:
-            self.stdout.write(self.style.WARNING("⚠ 没有可导入的条目"))
+            self.stdout.write(self.style.WARNING("没有可导入的条目"))
             return
 
         self.stdout.write(self.style.MIGRATE_HEADING(
-            f"\n📋 准备导入 {len(entries)} 条 OFAC 制裁实体"
+            f"\n准备导入 {len(entries)} 条 OFAC 制裁实体"
         ))
 
         if dry_run:
-            self.stdout.write(self.style.WARNING("🔍 预览模式 — 不写入数据库\n"))
+            self.stdout.write(self.style.WARNING("预览模式 — 不写入数据库\n"))
             # 统计
             types = {}
             for e in entries:
@@ -781,9 +849,9 @@ class Command(BaseCommand):
                 sanction_entry__list_type="OFAC"
             ).delete()
             if hit_deleted:
-                self.stdout.write(f"   🗑 已清除 {hit_deleted} 条关联命中明细")
+                self.stdout.write(f"   已清除 {hit_deleted} 条关联命中明细")
             deleted, _ = SanctionList.objects.filter(list_type="OFAC").delete()
-            self.stdout.write(f"   🗑 已清除 {deleted} 条旧 OFAC 数据")
+            self.stdout.write(f"   已清除 {deleted} 条旧 OFAC 数据")
 
         # 批量创建
         created = SanctionList.objects.bulk_create(entries, ignore_conflicts=True, batch_size=200)
@@ -792,8 +860,8 @@ class Command(BaseCommand):
         total_all = SanctionList.objects.count()
 
         self.stdout.write(self.style.SUCCESS(
-            f"\n✅ 导入完成!\n"
-            f"   • 本次写入: {len(created)} 条\n"
-            f"   • OFAC 总计: {total_ofac} 条\n"
-            f"   • 全部名单: {total_all} 条"
+            f"\n导入完成!\n"
+            f"   - 本次写入: {len(created)} 条\n"
+            f"   - OFAC 总计: {total_ofac} 条\n"
+            f"   - 全部名单: {total_all} 条"
         ))

@@ -32,10 +32,12 @@ class MerchantDailyReport(BaseModel):
     net_amount = models.DecimalField(
         max_digits=18, decimal_places=2, default=0, verbose_name="净收单金额"
     )
+    currency = models.CharField(max_length=3, blank=True, default="", db_index=True, verbose_name="币种")
+    data_watermark = models.DateTimeField(null=True, blank=True, verbose_name="数据水位")
 
     class Meta:
         db_table = "merchant_daily_report"
-        unique_together = [["report_date", "merchant"]]
+        unique_together = [["report_date", "merchant", "currency"]]
         verbose_name = "商户日收单报表"
         verbose_name_plural = verbose_name
 
@@ -50,10 +52,12 @@ class ChannelFeeReport(BaseModel):
     total_amount = models.DecimalField(max_digits=18, decimal_places=2, verbose_name="交易总金额")
     channel_fee = models.DecimalField(max_digits=18, decimal_places=2, verbose_name="渠道手续费")
     platform_fee = models.DecimalField(max_digits=18, decimal_places=2, verbose_name="平台手续费")
+    currency = models.CharField(max_length=3, blank=True, default="", db_index=True, verbose_name="币种")
+    data_watermark = models.DateTimeField(null=True, blank=True, verbose_name="数据水位")
 
     class Meta:
         db_table = "channel_fee_report"
-        unique_together = [["report_date", "bank_code"]]
+        unique_together = [["report_date", "bank_code", "currency"]]
         verbose_name = "渠道手续费结算表"
         verbose_name_plural = verbose_name
 
@@ -61,7 +65,7 @@ class ChannelFeeReport(BaseModel):
 class PlatformOrderSummary(BaseModel):
     """平台订单汇总表。"""
 
-    report_date = models.DateField(unique=True, db_index=True, verbose_name="报表日期")
+    report_date = models.DateField(db_index=True, verbose_name="报表日期")
     total_merchants = models.IntegerField(default=0, verbose_name="活跃商户数")
     total_orders = models.IntegerField(default=0, verbose_name="总订单笔数")
     total_amount = models.DecimalField(max_digits=18, decimal_places=2, verbose_name="总金额")
@@ -69,8 +73,11 @@ class PlatformOrderSummary(BaseModel):
     total_refunds = models.IntegerField(default=0, verbose_name="总退款笔数")
     total_refund_amount = models.DecimalField(max_digits=18, decimal_places=2, verbose_name="总退款金额")
     settled_amount = models.DecimalField(max_digits=18, decimal_places=2, verbose_name="已清算金额")
+    currency = models.CharField(max_length=3, blank=True, default="", db_index=True, verbose_name="币种")
+    data_watermark = models.DateTimeField(null=True, blank=True, verbose_name="数据水位")
 
     class Meta:
         db_table = "platform_order_summary"
+        unique_together = [["report_date", "currency"]]
         verbose_name = "平台订单汇总表"
         verbose_name_plural = verbose_name

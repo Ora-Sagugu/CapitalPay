@@ -1,4 +1,5 @@
 """Agent models — 代理服务"""
+import uuid
 from django.db import models
 from django.utils import timezone
 from apps.core.models import BaseModel
@@ -24,7 +25,10 @@ class Agent(BaseModel):
     contact_name = models.CharField("联系人", max_length=64, blank=True)
     contact_phone = models.CharField("联系电话", max_length=20, blank=True)
     contact_email = models.EmailField("联系邮箱", blank=True)
-    commission_rate = models.DecimalField("佣金比例", max_digits=8, decimal_places=6, default=0)
+    commission_rate = models.DecimalField(
+        "佣金比例", max_digits=8, decimal_places=6, default=0,
+        help_text="该代理名下客户交易手续费的分成比例，0.50 表示 50%",
+    )
     max_merchant_count = models.IntegerField("最大商户数", default=0)  # 0=无限制
 
     # ── 尽调信息 ──
@@ -45,12 +49,21 @@ class Agent(BaseModel):
     settlement_account_holder = models.CharField("账户持有人", max_length=128, blank=True)
 
     remark = models.TextField("备注", blank=True)
+    api_key = models.CharField("API Key", max_length=64, unique=True, null=True, blank=True)
+    api_secret = models.CharField("API 密钥", max_length=256, blank=True)
 
     class Meta:
         db_table = "agent"
         verbose_name = "代理商"
         verbose_name_plural = verbose_name
         ordering = ["-created_at"]
+
+    def save(self, *args, **kwargs):
+        if not self.api_key:
+            self.api_key = f"ak_{uuid.uuid4().hex[:32]}"
+        if not self.api_secret:
+            self.api_secret = f"sk_{uuid.uuid4().hex}"
+        super().save(*args, **kwargs)
 
     def __str__(self):
         return f"{self.agent_no} - {self.agent_name}"
@@ -73,41 +86,6 @@ class AgentMerchant(BaseModel):
 
     def __str__(self):
         return f"{self.agent.agent_name} - {self.merchant.merchant_name}"
-
-
-class AgentFeeConfig(BaseModel):
-    """代理商费率配置 — 差异化手续费标准与分润比例"""
-    FEE_TYPE_CHOICES = (
-        ("TRANSACTION", "交易手续费"),
-        ("SETTLEMENT", "结算手续费"),
-        ("SERVICE", "服务费"),
-    )
-    CURRENCY_CHOICES = (
-        ("USD", "美元"), ("EUR", "欧元"), ("GBP", "英镑"),
-        ("CNY", "人民币"), ("JPY", "日元"), ("HKD", "港币"),
-    )
-    agent = models.ForeignKey(Agent, on_delete=models.CASCADE, related_name="fee_configs", verbose_name="代理商")
-    fee_type = models.CharField("费用类型", max_length=16, choices=FEE_TYPE_CHOICES, default="TRANSACTION")
-    currency = models.CharField("币种", max_length=4, choices=CURRENCY_CHOICES, default="USD")
-    rate = models.DecimalField("费率(%)", max_digits=8, decimal_places=6, default=0,
-                               help_text="百分比费率，如 0.5 表示 0.5%")
-    fixed_fee = models.DecimalField("固定手续费", max_digits=14, decimal_places=2, default=0,
-                                    help_text="每笔固定收取金额")
-    min_amount = models.DecimalField("最低收费", max_digits=14, decimal_places=2, default=0)
-    max_amount = models.DecimalField("最高收费", max_digits=14, decimal_places=2, default=0,
-                                     help_text="0 表示不设上限")
-    is_active = models.BooleanField("启用", default=True)
-    remark = models.TextField("备注", blank=True)
-
-    class Meta:
-        db_table = "agent_fee_config"
-        verbose_name = "代理商费率配置"
-        verbose_name_plural = verbose_name
-        unique_together = [("agent", "fee_type", "currency")]
-        ordering = ["agent", "fee_type", "currency"]
-
-    def __str__(self):
-        return f"{self.agent.agent_name} — {self.get_fee_type_display()} — {self.currency}"
 
 
 class AgentCommission(BaseModel):

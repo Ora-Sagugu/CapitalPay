@@ -1,16 +1,19 @@
-from datetime import date, timedelta
+from datetime import date
 from decimal import Decimal
 
-from django.db.models import Q, Count, Max
+from django.db.models import Q, Max
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 
 from .models import ExchangeRate
+from .providers import DEFAULT_BASE_RATES, get_fx_provider
 from .serializers import ExchangeRateSerializer
+from apps.rbac.permissions import RequiresFeature
 
 
-class ExchangeRateViewSet(viewsets.ModelViewSet):
+class ExchangeRateViewSet(RequiresFeature, viewsets.ModelViewSet):
+    feature_code = "feature:exchange_rates"
     queryset = ExchangeRate.objects.all().order_by("-date")
     serializer_class = ExchangeRateSerializer
     pagination_class = None  # Return all results for frontend filtering
@@ -91,26 +94,8 @@ class ExchangeRateViewSet(viewsets.ModelViewSet):
         else:
             # Default built-in rates: USD/CNY/EUR/GBP/JPY/HKD cross pairs
             pairs = [
-                ("USD", "CNY", Decimal("7.2456"), "Reuters"),
-                ("CNY", "USD", Decimal("0.1380"), "Reuters"),
-                ("USD", "EUR", Decimal("0.9185"), "Reuters"),
-                ("EUR", "USD", Decimal("1.0887"), "Reuters"),
-                ("USD", "GBP", Decimal("0.7892"), "Reuters"),
-                ("GBP", "USD", Decimal("1.2671"), "Reuters"),
-                ("USD", "JPY", Decimal("149.35"), "Reuters"),
-                ("JPY", "USD", Decimal("0.006696"), "Reuters"),
-                ("USD", "HKD", Decimal("7.8124"), "Reuters"),
-                ("HKD", "USD", Decimal("0.1280"), "Reuters"),
-                ("CNY", "HKD", Decimal("1.0782"), "Reuters"),
-                ("HKD", "CNY", Decimal("0.9275"), "Reuters"),
-                ("EUR", "CNY", Decimal("7.8862"), "Reuters"),
-                ("EUR", "GBP", Decimal("0.8594"), "Reuters"),
-                ("EUR", "JPY", Decimal("162.58"), "Reuters"),
-                ("GBP", "CNY", Decimal("9.1753"), "Reuters"),
-                ("GBP", "JPY", Decimal("189.12"), "Reuters"),
-                ("GBP", "HKD", Decimal("9.8937"), "Reuters"),
-                ("JPY", "CNY", Decimal("0.04852"), "Reuters"),
-                ("HKD", "JPY", Decimal("19.12"), "Reuters"),
+                (from_currency, to_currency, rate, "Reuters")
+                for (from_currency, to_currency), rate in DEFAULT_BASE_RATES.items()
             ]
 
         created = 0
@@ -153,8 +138,6 @@ class ExchangeRateViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=["post"])
     def sync_realtime(self, request):
         """Sync real-time exchange rates from configured FX provider."""
-        from .providers import get_fx_provider
-
         today = date.today()
         source = (request.data or {}).get("source", "Bloomberg")
         try:

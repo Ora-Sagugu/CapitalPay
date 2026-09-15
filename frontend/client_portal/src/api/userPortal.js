@@ -1,11 +1,16 @@
 import request from './request'
 
-// 用户端管理（admin 视角）
 export function getOnboardingList(params) {
   return request.get('/v1/admin/onboarding/', { params })
 }
+export function getOnboardingDetail(id) {
+  return request.get(`/v1/admin/onboarding/${id}/detail/`)
+}
 export function reviewOnboarding(id, data) {
   return request.post(`/v1/admin/onboarding/${id}/review/`, data)
+}
+export function startOnboardingReview(id) {
+  return request.post(`/v1/admin/onboarding/${id}/start-review/`)
 }
 export function bindOnboardingMerchant(id, data) {
   return request.post(`/v1/admin/end-users/${id}/bind-merchant/`, data)

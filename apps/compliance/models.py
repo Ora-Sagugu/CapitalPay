@@ -14,24 +14,19 @@ class SanctionList(BaseModel):
     LIST_TYPES = (
         ("OFAC", "OFAC(美国)"),
         ("UN", "联合国"),
-        ("EU", "欧盟"),
-        ("MPS", "公安部"),
-        ("PBOC", "人民银行"),
-        ("INTERNAL", "内部黑名单"),
     )
     ENTITY_TYPES = (
-        ("PERSON", "个人"),
-        ("COMPANY", "企业"),
-        ("CITY", "城市"),
-        ("COUNTRY", "国家"),
-        ("VESSEL", "船只"),
-        ("OTHER", "其他"),
+        ("INDIVIDUAL", "Individual"),
+        ("ENTITY", "Entity"),
+        ("ORGANIZATION", "Organization"),
+        ("COUNTRY", "Country"),
+        ("REGION", "Region"),
     )
     entity_name = models.CharField("实体名称", max_length=256, db_index=True)
     alias_names = models.TextField("别名(逗号分隔)", blank=True)
     reference_id = models.CharField("名单编号", max_length=32, blank=True, db_index=True,
                                     help_text="制裁名单中的唯一编号，如 QDi.371, KPe.030")
-    entity_type = models.CharField("实体类型", max_length=32, choices=ENTITY_TYPES, default="PERSON")
+    entity_type = models.CharField("实体类型", max_length=32, choices=ENTITY_TYPES, default="INDIVIDUAL")
     list_type = models.CharField("名单来源", max_length=16, choices=LIST_TYPES)
     risk_level = models.CharField("风险等级", max_length=8, choices=RISK_LEVELS, default="MEDIUM")
     id_number = models.CharField("证件号码", max_length=256, blank=True)

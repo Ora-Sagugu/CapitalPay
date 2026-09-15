@@ -80,8 +80,12 @@ class AdjustmentService:
     @staticmethod
     def create_application(data: Dict[str, Any]) -> AdjustmentApplication:
         from uuid import uuid4
-        data["application_no"] = f"ADJ{timezone.now().strftime('%Y%m%d%H%M%S')}{uuid4().hex[:4].upper()}"
-        app = AdjustmentApplication.objects.create(**data)
+        payload = dict(data)
+        payload["application_no"] = f"ADJ{timezone.now().strftime('%Y%m%d%H%M%S')}{uuid4().hex[:4].upper()}"
+        payload.setdefault("applicant", payload.get("applicant") or "admin")
+        if not payload.get("adjustment_amount"):
+            payload["adjustment_amount"] = payload.get("amount") or 0
+        app = AdjustmentApplication.objects.create(**payload)
         return app
 
     @staticmethod
@@ -104,6 +108,9 @@ class AdjustmentService:
             app.status = AdjustmentApplication.Status.APPROVED
             app.completed_at = timezone.now()
             app.save()
+            AdjustmentService._post_ledger(app)
+            app.status = AdjustmentApplication.Status.COMPLETED
+            app.save(update_fields=["status", "updated_at"])
             return app
         except AdjustmentApplication.DoesNotExist:
             return None
@@ -136,3 +143,38 @@ class AdjustmentService:
             return True
         except AdjustmentApplication.DoesNotExist:
             return False
+
+    @staticmethod
+    def _post_ledger(app: AdjustmentApplication) -> None:
+        """审批通过后过账：按调账金额调整关联 Nostro 或记录订单历史。"""
+        from decimal import Decimal
+        from apps.account.models import NostroAccount
+        from apps.account.services import AccountService
+        from apps.payment.models import PaymentOrder
+
+        amount = Decimal(str(app.adjustment_amount or app.amount or 0))
+        if amount == 0:
+            return
+        is_credit = amount > 0
+        abs_amount = abs(amount)
+
+        order = None
+        if app.order_no:
+            order = PaymentOrder.objects.filter(order_no=app.order_no, is_deleted=False).first()
+        account = None
+        if app.bank_channel:
+            account = NostroAccount.objects.filter(
+                bank_name=app.bank_channel, is_deleted=False, is_active=True
+            ).first()
+        if not account and order:
+            account = NostroAccount.objects.filter(
+                merchant=order.merchant, is_deleted=False
+            ).first()
+        if account:
+            AccountService().update_balance(account, abs_amount, is_credit=is_credit)
+        if order:
+            order.add_status_history("ADJUSTMENT", {
+                "application_no": app.application_no,
+                "adjustment_amount": str(amount),
+            })
+            order.save(update_fields=["status_history", "updated_at"])

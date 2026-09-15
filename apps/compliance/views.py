@@ -1,21 +1,25 @@
 """Compliance API views"""
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
+from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.response import Response
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework.filters import SearchFilter, OrderingFilter
 
+from .file_import import import_official_file
 from .models import SanctionList, SanctionScanRecord, SanctionHitDetail
 from .serializers import (
     SanctionListSerializer, SanctionScanRecordSerializer, SanctionHitDetailSerializer,
 )
 from .services import scan_entity
 from apps.rbac.authentication import JWTAuthentication
+from apps.rbac.permissions import RequiresFeature
 
 
-class SanctionListViewSet(viewsets.ModelViewSet):
+class SanctionListViewSet(RequiresFeature, viewsets.ModelViewSet):
     """制裁名单管理"""
     authentication_classes = [JWTAuthentication]
+    feature_code = "feature:sanctions"
     queryset = SanctionList.objects.all()
     serializer_class = SanctionListSerializer
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
@@ -85,12 +89,26 @@ class SanctionListViewSet(viewsets.ModelViewSet):
             "by_entity": by_entity,
         })
 
+    @action(
+        detail=False,
+        methods=["post"],
+        url_path="import-file",
+        parser_classes=[MultiPartParser, FormParser],
+    )
+    def import_file(self, request):
+        """Import an official OFAC SDN.CSV or UN consolidated.xml upload."""
+        result = import_official_file(
+            uploaded=request.FILES.get("file"),
+            list_type=request.data.get("list_type", ""),
+            reset=request.data.get("reset", False),
+        )
+        return Response(result, status=status.HTTP_200_OK)
+
     @action(detail=False, methods=["post"])
     def import_builtin(self, request):
         """导入制裁名单数据
 
-        优先尝试使用真实数据文件（import_real_sanctions 命令），
-        如果文件不存在则回退到内置样本数据（旧命令）。
+        优先从 OFAC/UN 官方源全量下载；本地 zip/html 为备选；最后回退样本数据。
         """
         import io
         import sys
@@ -99,44 +117,58 @@ class SanctionListViewSet(viewsets.ModelViewSet):
 
         source = request.data.get("source", "ALL")
         reset = request.data.get("reset", False)
-
-        # 真实数据文件默认路径（用户下载目录）
-        default_un = os.path.expanduser("~/Downloads/consolidatedLegacyByPRN.html")
-        default_ofac = os.path.expanduser("~/Downloads/sdn_enhanced.zip")
-
-        un_available = os.path.exists(default_un)
-        ofac_available = os.path.exists(default_ofac)
-
-        # 请求中指定的自定义文件路径
-        un_file = request.data.get("un_file", default_un if un_available else None)
-        ofac_file = request.data.get("ofac_file", default_ofac if ofac_available else None)
+        use_official = request.data.get("use_official", True)
 
         results = {}
-        use_real = (un_file and os.path.exists(un_file)) or (ofac_file and os.path.exists(ofac_file))
 
-        if use_real:
-            # 使用新的真实数据导入命令
+        if use_official and source == "ALL":
             try:
-                cmd_args = []
-                if source in ("UN", "ALL") and un_file:
-                    cmd_args.append(f"--un-file={un_file}")
-                if source in ("OFAC", "ALL") and ofac_file:
-                    cmd_args.append(f"--ofac-file={ofac_file}")
-                if source == "UN" and un_file:
-                    cmd_args.append("--only-un")
-                elif source == "OFAC" and ofac_file:
-                    cmd_args.append("--only-ofac")
-                if reset:
-                    cmd_args.append("--reset")
+                output = io.StringIO()
+                old_stdout, old_stderr = sys.stdout, sys.stderr
+                sys.stdout = output
+                sys.stderr = io.StringIO()
+                try:
+                    kwargs = {"download": True}
+                    if reset:
+                        kwargs["reset"] = True
+                    call_command("import_all_sanctions", **kwargs)
+                finally:
+                    sys.stdout = old_stdout
+                    sys.stderr = old_stderr
+                results["source"] = "official"
+                results["status"] = "success"
+                results["output"] = output.getvalue()[-2000:]
+            except Exception as exc:
+                results["source"] = "official"
+                results["status"] = "error"
+                results["message"] = str(exc)
+                use_official = False
 
-                if not cmd_args:
-                    results["error"] = "未找到可导入的数据文件"
-                else:
+        if results.get("status") != "success":
+            default_un = os.path.expanduser("~/Downloads/consolidatedLegacyByPRN.html")
+            default_ofac = os.path.expanduser("~/Downloads/sdn_enhanced.zip")
+            un_file = request.data.get("un_file", default_un if os.path.exists(default_un) else None)
+            ofac_file = request.data.get("ofac_file", default_ofac if os.path.exists(default_ofac) else None)
+            use_real = (un_file and os.path.exists(un_file)) or (ofac_file and os.path.exists(ofac_file))
+
+            if use_real:
+                try:
+                    cmd_args = []
+                    if source in ("UN", "ALL") and un_file:
+                        cmd_args.append(f"--un-file={un_file}")
+                    if source in ("OFAC", "ALL") and ofac_file:
+                        cmd_args.append(f"--ofac-file={ofac_file}")
+                    if source == "UN" and un_file:
+                        cmd_args.append("--only-un")
+                    elif source == "OFAC" and ofac_file:
+                        cmd_args.append("--only-ofac")
+                    if reset:
+                        cmd_args.append("--reset")
+
                     output = io.StringIO()
-                    err_out = io.StringIO()
                     old_stdout, old_stderr = sys.stdout, sys.stderr
                     sys.stdout = output
-                    sys.stderr = err_out
+                    sys.stderr = io.StringIO()
                     try:
                         call_command("import_real_sanctions", *cmd_args)
                     finally:
@@ -145,42 +177,54 @@ class SanctionListViewSet(viewsets.ModelViewSet):
 
                     results["source"] = "real"
                     results["status"] = "success"
-                    results["output"] = output.getvalue()[-2000:]  # 截取最后2000字符
-            except Exception as e:
-                results["source"] = "real"
-                results["status"] = "error"
-                results["message"] = str(e)
-        else:
-            # 回退到内置样本数据
-            if source in ("OFAC", "ALL"):
-                try:
-                    output = io.StringIO()
-                    old_stdout, old_stderr = sys.stdout, sys.stderr
-                    sys.stdout = output
-                    sys.stderr = io.StringIO()
-                    try:
-                        call_command("import_ofac_sdn", use_builtin=True, reset=reset, max_entries=500)
-                    finally:
-                        sys.stdout = old_stdout
-                        sys.stderr = old_stderr
-                    results["OFAC"] = {"status": "success", "output": output.getvalue()}
+                    results["output"] = output.getvalue()[-2000:]
                 except Exception as e:
-                    results["OFAC"] = {"status": "error", "message": str(e)}
+                    results["source"] = "real"
+                    results["status"] = "error"
+                    results["message"] = str(e)
+            elif results.get("status") != "error":
+                if source in ("OFAC", "ALL"):
+                    try:
+                        output = io.StringIO()
+                        old_stdout, old_stderr = sys.stdout, sys.stderr
+                        sys.stdout = output
+                        sys.stderr = io.StringIO()
+                        try:
+                            call_command(
+                                "import_ofac_sdn",
+                                download=True,
+                                reset=reset,
+                                max_entries=0,
+                            )
+                        finally:
+                            sys.stdout = old_stdout
+                            sys.stderr = old_stderr
+                        results["OFAC"] = {"status": "success", "output": output.getvalue()}
+                    except Exception as e:
+                        results["OFAC"] = {"status": "error", "message": str(e)}
 
-            if source in ("UN", "ALL"):
-                try:
-                    output2 = io.StringIO()
-                    old_stdout, old_stderr = sys.stdout, sys.stderr
-                    sys.stdout = output2
-                    sys.stderr = io.StringIO()
+                if source in ("UN", "ALL"):
                     try:
-                        call_command("import_un_sanctions", reset=reset)
-                    finally:
-                        sys.stdout = old_stdout
-                        sys.stderr = old_stderr
-                    results["UN"] = {"status": "success", "output": output2.getvalue()}
-                except Exception as e:
-                    results["UN"] = {"status": "error", "message": str(e)}
+                        output2 = io.StringIO()
+                        old_stdout, old_stderr = sys.stdout, sys.stderr
+                        sys.stdout = output2
+                        sys.stderr = io.StringIO()
+                        try:
+                            call_command(
+                                "import_un_sanctions",
+                                download=True,
+                                reset=reset,
+                                max_entries=0,
+                            )
+                        finally:
+                            sys.stdout = old_stdout
+                            sys.stderr = old_stderr
+                        results["UN"] = {"status": "success", "output": output2.getvalue()}
+                    except Exception as e:
+                        results["UN"] = {"status": "error", "message": str(e)}
+
+                if not results.get("source"):
+                    results["source"] = "official_fallback"
 
         return Response({
             "results": results,
@@ -189,7 +233,8 @@ class SanctionListViewSet(viewsets.ModelViewSet):
             "total_all": SanctionList.objects.filter(is_active=True).count(),
         })
 
-class SanctionScanRecordViewSet(viewsets.ReadOnlyModelViewSet):
+class SanctionScanRecordViewSet(RequiresFeature, viewsets.ReadOnlyModelViewSet):
+    feature_code = "feature:scans"
     """制裁扫描记录查询"""
     authentication_classes = [JWTAuthentication]
     queryset = SanctionScanRecord.objects.all().prefetch_related("hits__sanction_entry")
@@ -202,6 +247,35 @@ class SanctionScanRecordViewSet(viewsets.ReadOnlyModelViewSet):
     @action(detail=False, methods=["post"])
     def scan(self, request):
         """执行制裁扫描"""
+        scan_type = str(request.data.get("scan_type", "TRANSACTION")).upper()
+        if scan_type == "FULL":
+            from apps.agent.models import Agent
+            from apps.merchant.models import Merchant
+            from apps.user_portal.models import EndUser
+
+            targets = []
+            for merchant in Merchant.objects.filter(is_deleted=False).exclude(status="CLOSED"):
+                targets.append((merchant.merchant_name, "COMPANY", merchant.merchant_no))
+                if merchant.legal_person_name:
+                    targets.append((merchant.legal_person_name, "PERSON", f"{merchant.merchant_no}:legal"))
+            for agent in Agent.objects.filter(is_deleted=False, status="ACTIVE"):
+                targets.append((agent.agent_name, "COMPANY", agent.agent_no))
+                if agent.legal_person:
+                    targets.append((agent.legal_person, "PERSON", f"{agent.agent_no}:legal"))
+            for user in EndUser.objects.filter(is_deleted=False, is_active=True).exclude(real_name=""):
+                targets.append((user.real_name, "PERSON", str(user.id)))
+
+            records = [
+                scan_entity(name, target_type, target_id, scan_type="BATCH")[1]
+                for name, target_type, target_id in targets
+            ]
+            return Response({
+                "scan_type": "FULL",
+                "count": len(records),
+                "hit_count": sum(record.hit_count for record in records),
+                "results": self.get_serializer(records, many=True).data,
+            }, status=status.HTTP_201_CREATED)
+
         target_name = request.data.get("target_name", "")
         target_type = request.data.get("target_type", "PERSON")
         target_id = request.data.get("target_id", "")
@@ -212,7 +286,8 @@ class SanctionScanRecordViewSet(viewsets.ReadOnlyModelViewSet):
         return Response(serializer.data)
 
 
-class SanctionHitDetailViewSet(viewsets.ReadOnlyModelViewSet):
+class SanctionHitDetailViewSet(RequiresFeature, viewsets.ReadOnlyModelViewSet):
+    feature_code = "feature:scans"
     """制裁命中明细查询"""
     authentication_classes = [JWTAuthentication]
     queryset = SanctionHitDetail.objects.all()

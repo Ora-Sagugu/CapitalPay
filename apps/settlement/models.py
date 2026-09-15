@@ -43,6 +43,8 @@ class SettlementBatch(BaseModel):
     )
     settled_at = models.DateTimeField(null=True, verbose_name="清算完成时间")
     fail_reason = models.CharField(max_length=256, blank=True, verbose_name="失败原因")
+    currency = models.CharField(max_length=3, blank=True, default="", db_index=True, verbose_name="币种")
+    bank_txn_id = models.CharField(max_length=64, blank=True, default="", verbose_name="银行出款流水号")
 
     # ── 结算账户 ──
     settlement_account_info = models.JSONField(default=dict, verbose_name="结算账户信息快照")
@@ -55,6 +57,7 @@ class SettlementBatch(BaseModel):
         indexes = [
             models.Index(fields=["merchant", "settle_date"]),
             models.Index(fields=["status", "settle_date"]),
+            models.Index(fields=["merchant", "settle_date", "currency"]),
         ]
 
 
@@ -83,10 +86,9 @@ class FeeShare(BaseModel):
 
     功能清单对应: 手续费分润管理
     分账公式:
-        channel_fee = 渠道手续费（银行收取）
-        platform_gross = total_fee - channel_fee（平台毛利）
-        agent_fee = platform_gross * commission_rate（代理商佣金）
-        platform_fee = platform_gross - agent_fee（平台净收益）
+        agent_fee = total_fee * commission_rate（客户手续费分成）
+        platform_fee = total_fee - agent_fee（手续费余下归平台）
+        channel_fee = 渠道手续费（银行成本，不参与代理分成）
     """
 
     settlement_detail = models.OneToOneField(
@@ -110,23 +112,30 @@ class FeeShare(BaseModel):
         max_digits=18, decimal_places=2, default=0, verbose_name="订单金额"
     )
     total_fee = models.DecimalField(
-        max_digits=12, decimal_places=4, default=0, verbose_name="商户手续费总额"
+        max_digits=12, decimal_places=2, default=0, verbose_name="商户手续费总额"
     )
     # ── 分润金额 ──
     channel_fee = models.DecimalField(
-        max_digits=12, decimal_places=4, default=0, verbose_name="渠道手续费"
+        max_digits=12, decimal_places=2, default=0, verbose_name="渠道手续费"
     )
     platform_fee = models.DecimalField(
-        max_digits=12, decimal_places=4, default=0, verbose_name="平台净收益"
+        max_digits=12, decimal_places=2, default=0, verbose_name="平台净收益"
     )
     agent_fee = models.DecimalField(
-        max_digits=12, decimal_places=4, default=0, verbose_name="代理商佣金"
+        max_digits=12, decimal_places=2, default=0, verbose_name="代理商佣金"
     )
 
     class Meta:
         db_table = "fee_share"
         verbose_name = "手续费分润"
         verbose_name_plural = verbose_name
+        constraints = [
+            models.UniqueConstraint(
+                fields=["payment_order"],
+                condition=models.Q(payment_order__isnull=False),
+                name="unique_fee_share_payment_order",
+            ),
+        ]
         indexes = [
             models.Index(fields=["agent"]),
             models.Index(fields=["order_no"]),

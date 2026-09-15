@@ -7,6 +7,7 @@ from django.utils import timezone
 from apps.core.exceptions import BusinessException, ErrorCode
 from ..models import PaymentOrder
 from ..gateway import BankGatewayRouter
+from .prn_service import extract_prn_from_remark
 
 
 class PaymentConfirmService:
@@ -19,7 +20,7 @@ class PaymentConfirmService:
     """
 
     UIN_PATTERN = re.compile(r"UIN\d{17}")
-    PRN_PATTERN = re.compile(r"(?:PRN|prn)[:：\s]*(\d{6})|(?:^|\s)(\d{6})(?:\s|$)")
+    PRN_PATTERN = re.compile(r"(?:PRN|prn)[:：\s]*([A-Za-z0-9]\d{5})|(?:^|\s)([A-Za-z0-9]\d{5})(?:\s|$)")
 
     def auto_match_wire_transfer(self, bank_statement_line: dict) -> PaymentOrder | None:
         """银行流水到达 → 自动匹配订单。
@@ -43,9 +44,8 @@ class PaymentConfirmService:
         prn_code = self._extract_prn(remark)
         if prn_code:
             order = PaymentOrder.objects.filter(
-                prn_code=prn_code,
+                prn_code__iexact=prn_code,
                 status__in=[
-                    PaymentOrder.OrderStatus.PENDING_REVIEW,
                     PaymentOrder.OrderStatus.PENDING_PAY,
                 ],
             ).first()
@@ -58,7 +58,10 @@ class PaymentConfirmService:
             uin = uin_match.group()
             order = PaymentOrder.objects.filter(
                 unique_identification_no=uin,
-                status=PaymentOrder.OrderStatus.PRE_CREATE,
+                status__in=[
+                    PaymentOrder.OrderStatus.PRE_CREATE,
+                    PaymentOrder.OrderStatus.PENDING_PAY,
+                ],
             ).first()
             if order:
                 return self._confirm_payment(order, bank_statement_line)
@@ -67,7 +70,10 @@ class PaymentConfirmService:
         bank_time = bank_statement_line["txn_time"]
         candidates = PaymentOrder.objects.filter(
             amount=bank_amount,
-            status=PaymentOrder.OrderStatus.PRE_CREATE,
+            status__in=[
+                PaymentOrder.OrderStatus.PRE_CREATE,
+                PaymentOrder.OrderStatus.PENDING_PAY,
+            ],
             pay_method=PaymentOrder.PayMethod.WIRE_TRANSFER,
             created_at__gte=bank_time - timezone.timedelta(hours=24),
             created_at__lte=bank_time + timezone.timedelta(hours=1),
@@ -78,29 +84,38 @@ class PaymentConfirmService:
 
         return None
 
-    def manual_confirm(self, order_id: str, user_id: str, bank_txn_id: str = None) -> PaymentOrder:
-        """用户手动关联汇款 → 确认收款。
+    def manual_confirm(self, order_id: str, user_id: str = None, bank_txn_id: str = None) -> PaymentOrder:
+        """用户或运营手动关联汇款 → 确认收款。
 
         功能清单对应: 用户汇款确认
         """
-        from apps.core.utils import generate_order_no as _unused  # keep import clean
-        order = PaymentOrder.objects.get(id=order_id, user_id=user_id)
+        qs = PaymentOrder.objects.filter(id=order_id)
+        if user_id:
+            qs = qs.filter(user_id=user_id)
+        order = qs.first()
+        if not order:
+            raise BusinessException(ErrorCode.ORDER_NOT_FOUND)
 
-        if order.status != PaymentOrder.OrderStatus.PRE_CREATE:
+        if order.status not in {
+            PaymentOrder.OrderStatus.PRE_CREATE,
+            PaymentOrder.OrderStatus.PENDING_PAY,
+        }:
             raise BusinessException(ErrorCode.ORDER_STATUS_INVALID)
 
-        return self._confirm_payment(order, {"txn_id": bank_txn_id or ""})
+        return self._confirm_payment(order, {"txn_id": bank_txn_id or "", "amount": order.amount})
+
+    def manual_confirm_by_order_no(self, order_no: str, bank_txn_id: str = None, user_id: str = None) -> PaymentOrder:
+        order = PaymentOrder.objects.filter(order_no=order_no, is_deleted=False).first()
+        if not order:
+            raise BusinessException(ErrorCode.ORDER_NOT_FOUND)
+        if user_id and str(order.user_id or "") != str(user_id):
+            raise BusinessException("PERMISSION_DENIED", "The authenticated principal is not authorised to confirm this instruction", 403)
+        return self.manual_confirm(str(order.id), user_id=user_id, bank_txn_id=bank_txn_id)
 
     @staticmethod
     def _extract_prn(remark: str) -> str | None:
         """从附言中提取 6 位 PRN 码。"""
-        if not remark:
-            return None
-        m = re.search(r"(?:PRN|prn)[:：\s]*(\d{6})", remark)
-        if m:
-            return m.group(1)
-        standalone = re.findall(r"(?:^|\s)(\d{6})(?:\s|$)", remark)
-        return standalone[0] if standalone else None
+        return extract_prn_from_remark(remark)
 
     @transaction.atomic
     def _confirm_payment(
@@ -113,16 +128,18 @@ class PaymentConfirmService:
         - 金额一致 → PAY_RECEIVED，创建交易记录
         - 通知 Payment Received (Status: CONFIRMED)
         """
-        order = PaymentOrder.objects.select_for_update().get(pk=order.pk)
+        order = PaymentOrder.objects.select_for_update().select_related("merchant").get(pk=order.pk)
 
-        # 可确认的状态：PRE_CREATE, PENDING_REVIEW, PENDING_PAY
+        # 待审核订单绝不能通过银行匹配绕过运营审核。
         confirmable = {
             PaymentOrder.OrderStatus.PRE_CREATE,
-            PaymentOrder.OrderStatus.PENDING_REVIEW,
             PaymentOrder.OrderStatus.PENDING_PAY,
         }
         if order.status not in confirmable:
             raise BusinessException(ErrorCode.ORDER_STATUS_INVALID)
+
+        from .remittance_policy import RemittanceEligibilityPolicy
+        RemittanceEligibilityPolicy.assert_can_continue_existing(order.merchant)
 
         bank_txn_id = bank_info.get("txn_id", "")
         bank_amount = bank_info.get("amount", order.amount)
@@ -131,7 +148,7 @@ class PaymentConfirmService:
         if Decimal(str(bank_amount)) != order.amount:
             raise BusinessException(
                 ErrorCode.ORDER_AMOUNT_MISMATCH,
-                f"银行金额 {bank_amount} 与订单金额 {order.amount} 不一致",
+                f"The bank amount {bank_amount} does not match the instruction amount {order.amount}",
             )
 
         now = timezone.now()
@@ -142,25 +159,129 @@ class PaymentConfirmService:
         if prn_code:
             extra["prn_matched"] = True
             extra["prn_code"] = prn_code
+        from .remittance_application import arm_agent_payout_request
+        arm_agent_payout_request(order)
+        if order.agent_payout_request_status == PaymentOrder.AgentPayoutRequestStatus.PENDING:
+            extra["agent_payout_request"] = "pending"
         order.add_status_history(PaymentOrder.OrderStatus.PAY_RECEIVED, extra)
-        order.save(update_fields=["status", "pay_received_at", "bank_txn_id", "status_history"])
+        order.save(update_fields=[
+            "status", "pay_received_at", "bank_txn_id", "status_history",
+            "agent_payout_request_status",
+        ])
 
+        self._credit_virtual_account(order)
         # ── 费用分账：手续费记入机构账户 ──
         self._credit_fees_to_agency(order)
+        self._record_collection_movement(order, bank_txn_id)
+        self._record_user_payment_detail(order)
+        from .prn_service import mark_prn_matched
+        mark_prn_matched(order.prn_code or prn_code, order)
+        from .notify import trigger_order_notify
+        trigger_order_notify(order)
 
         return order
 
-    def _credit_fees_to_agency(self, order: PaymentOrder):
-        """费用分账 — 将手续费记入机构账户。
+    @staticmethod
+    def _collection_currency(order: PaymentOrder) -> str:
+        """Remittance principal is in from_currency; pre-orders keep amount in order.currency.
 
-        Phase 5: Credit Fees to Agency Account
-        费用已随 PaymentOrder 创建时计算并存储，此处仅记录分账日志。
+        PaymentOrder.from_currency defaults to USD even when unused, so only trust it on
+        remittance snapshots (quote or beneficiary details).
         """
+        is_remittance = bool(
+            getattr(order, "quote_id", None) or (order.beneficiary_name or "").strip()
+        )
+        if is_remittance and order.from_currency:
+            return order.from_currency.strip().upper()
+        return (order.currency or order.from_currency or order.to_currency or "CNY").strip().upper() or "CNY"
+
+    def _credit_virtual_account(self, order: PaymentOrder):
+        """收款确认后贷记商户 VA 分类账（汇出币种本金）。"""
+        from apps.account.services import AccountService
+
+        svc = AccountService()
+        va = svc.merchant_va_for_currency(order.merchant, self._collection_currency(order))
+        if not va:
+            return
+        svc.post_va_entry(
+            virtual_account=va,
+            amount=order.amount,
+            entry_type="CREDIT",
+            order=order,
+            remark=f"Collection confirmed {order.order_no}",
+            source_type="PAYMENT",
+            source_id=str(order.id),
+        )
+
+    def _credit_fees_to_agency(self, order: PaymentOrder):
+        """费用分账 — 将手续费记入代理手续费账户。"""
+        from django.conf import settings
+        if not getattr(settings, "ENABLE_AGENTS", True):
+            return
         fee = order.fee_amount
-        if fee and fee > 0:
-            order.add_status_history("FEES_CREDITED", {
-                "fee_amount": str(fee),
-                "merchant": order.merchant.merchant_no,
-                "note": "手续费已记入机构账户",
-            })
-            order.save(update_fields=["status_history", "updated_at"])
+        if not fee or fee <= 0:
+            return
+        agent = getattr(order.merchant, "agent", None)
+        if agent:
+            from apps.account.models import NostroAccount, VaLedgerEntry
+            from apps.account.services import AccountService
+            from apps.agent.services import ensure_agent_accounts, get_agent_ledger_va
+
+            currency = self._collection_currency(order)
+            ensure_agent_accounts(agent, currency)
+            va = get_agent_ledger_va(agent, NostroAccount.AccountType.FEE, currency)
+            if va:
+                AccountService().post_va_entry(
+                    virtual_account=va,
+                    amount=fee,
+                    entry_type=VaLedgerEntry.EntryType.CREDIT,
+                    order=order,
+                    remark=f"Charges {order.order_no}",
+                    source_type="FEE",
+                    source_id=str(order.id),
+                )
+        order.add_status_history("FEES_CREDITED", {
+            "fee_amount": str(fee),
+            "merchant": order.merchant.merchant_no,
+            "note": "Charges have been posted to the institution account",
+        })
+        order.save(update_fields=["status_history", "updated_at"])
+
+    def _record_collection_movement(self, order: PaymentOrder, bank_txn_id: str):
+        """写入不可变收款流水。"""
+        from apps.account.models import MoneyMovement
+        from apps.account.money_movements import MoneyMovementService
+
+        currency = order.from_currency or order.currency or ""
+        evidence = (
+            MoneyMovement.EvidenceLevel.BANK_CONFIRMED
+            if bank_txn_id
+            else MoneyMovement.EvidenceLevel.SYSTEM_CONFIRMED
+        )
+        MoneyMovementService().record(
+            movement_type=MoneyMovement.MovementType.COLLECTION,
+            amount=order.amount,
+            currency=currency,
+            source_type="PAYMENT",
+            source_id=str(order.id),
+            status=MoneyMovement.MovementStatus.SUCCESS,
+            evidence_level=evidence,
+            occurred_at=order.pay_received_at,
+            from_party_type="PAYER",
+            from_party_id=order.user_id or "",
+            to_party_type="MERCHANT",
+            to_party_id=str(order.merchant_id or ""),
+            bank_code=order.bank_code or "",
+            bank_txn_id=bank_txn_id or "",
+            payment_order=order,
+            remark=f"System-confirmed collection {order.order_no}",
+        )
+
+    def _record_user_payment_detail(self, order: PaymentOrder):
+        if not order.user_id:
+            return
+        try:
+            from apps.account.services import AccountService
+            AccountService().record_payment_detail(order, order.user_id)
+        except Exception:
+            pass

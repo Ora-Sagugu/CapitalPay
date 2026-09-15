@@ -1,0 +1,23 @@
+[Unit]
+Description=CapitalPay Django (Gunicorn)
+After=network.target
+
+[Service]
+Type=notify
+User=www-data
+Group=www-data
+WorkingDirectory=/opt/capitalpay
+EnvironmentFile=/opt/capitalpay/.env
+Environment=DJANGO_SETTINGS_MODULE=b2b_payment.settings.production
+ExecStart=/opt/capitalpay/.venv/bin/gunicorn \
+    --bind 127.0.0.1:1024 \
+    --workers 3 \
+    --timeout 120 \
+    --access-logfile - \
+    --error-logfile - \
+    b2b_payment.wsgi:application
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

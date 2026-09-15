@@ -1,112 +1,259 @@
 <template>
-  <el-card class="page-card" shadow="never">
-    <template #header><span class="card-title">资金追踪</span></template>
-    <div class="toolbar">
-      <el-input v-model="q.order_no" placeholder="平台订单号 RMT…" clearable style="width: 180px" />
-      <el-input v-model="q.merchant_order_no" placeholder="商户订单号" clearable style="width: 160px" />
-      <el-input v-model="q.prn" placeholder="PRN" clearable style="width: 140px" />
-      <el-input v-model="q.beneficiary_name" placeholder="收款人姓名" clearable style="width: 140px" />
-      <el-input v-model="q.remitter_name" placeholder="汇款方姓名" clearable style="width: 140px" />
-      <el-button type="primary" :loading="loading" @click="search">查询</el-button>
+  <div>
+    <PageHeader :title="$t('pages.fundTrace.title')" :subtitle="$t('pages.fundTrace.subtitle')" />
+    <div class="page-card search-hero">
+      <div class="search-row">
+        <el-input
+          v-model="keyword"
+          size="large"
+          :prefix-icon="Search"
+          :placeholder="$t('pages.fundTrace.placeholder')"
+          clearable
+          @keyup.enter="search"
+        />
+        <el-button type="primary" size="large" :loading="loading" @click="search">
+          {{ $t('pages.fundTrace.trace') }}
+        </el-button>
+      </div>
     </div>
 
-    <el-table v-if="pendingOrders.length" :data="pendingOrders" border stripe style="margin-bottom: 16px" @row-click="pickOrder">
-      <el-table-column prop="order_no" label="订单号" />
-      <el-table-column prop="beneficiary_name" label="收款人" />
-      <el-table-column prop="amount" label="金额" />
-      <el-table-column prop="status" label="状态" />
-    </el-table>
+    <EmptyState v-if="!order && !matches.length && !loading" :message="$t('pages.fundTrace.empty')" icon="🔎" />
 
-    <div v-if="trace">
-      <el-descriptions :column="3" border style="margin-bottom: 20px">
-        <el-descriptions-item label="订单号">{{ trace.order_no }}</el-descriptions-item>
-        <el-descriptions-item label="PRN">{{ trace.prn }}</el-descriptions-item>
-        <el-descriptions-item label="状态">{{ trace.status }}</el-descriptions-item>
-        <el-descriptions-item label="汇款方">{{ trace.remitter_name }}</el-descriptions-item>
-        <el-descriptions-item label="金额">{{ trace.amount }} {{ trace.from_currency }}→{{ trace.to_currency }}</el-descriptions-item>
-        <el-descriptions-item label="收款人">{{ trace.beneficiary_name }}</el-descriptions-item>
+    <div v-if="order" class="page-card">
+      <div class="section-title">{{ $t('pages.fundTrace.orderInfo') }}</div>
+      <el-descriptions :column="3" border>
+        <el-descriptions-item :label="$t('pages.fundTrace.status')">
+          <StatusPill :value="order.status" />
+        </el-descriptions-item>
+        <el-descriptions-item :label="$t('pages.fundTrace.orderNo')">{{ order.order_no }}</el-descriptions-item>
+        <el-descriptions-item :label="$t('pages.fundTrace.merchantOrderNo')">{{ dash(order.merchant_order_no) }}</el-descriptions-item>
+        <el-descriptions-item :label="$t('pages.fundTrace.merchant')">{{ dash(order.remitter_name) }}</el-descriptions-item>
+        <el-descriptions-item :label="$t('pages.fundTrace.prn')">{{ dash(order.prn) }}</el-descriptions-item>
+        <el-descriptions-item :label="$t('pages.fundTrace.amount')">{{ amountLabel(order) }}</el-descriptions-item>
+        <el-descriptions-item :label="$t('pages.fundTrace.fee')">{{ moneyLabel(order.fee_amount, order.to_currency || order.from_currency) }}</el-descriptions-item>
+        <el-descriptions-item :label="$t('pages.fundTrace.settledAmount')">{{ moneyLabel(order.settle_amount, order.to_currency || order.from_currency) }}</el-descriptions-item>
       </el-descriptions>
-
-      <el-steps :active="stepActive" finish-status="success" align-center>
-        <el-step v-for="s in steps" :key="s.key" :title="s.title" :description="s.desc" />
-      </el-steps>
-
-      <el-row :gutter="16" style="margin-top: 24px">
-        <el-col :span="12" v-if="trace.virtual_account">
-          <el-card shadow="never"><template #header>收款 VA</template>
-            <div>账号：{{ trace.virtual_account.account_no }}</div>
-            <div>银行：{{ trace.virtual_account.bank_name }}</div>
-            <div>余额：{{ trace.virtual_account.balance }} {{ trace.virtual_account.currency }}</div>
-          </el-card>
-        </el-col>
-        <el-col :span="12" v-if="trace.nostro_account">
-          <el-card shadow="never"><template #header>Nostro</template>
-            <div>账号：{{ trace.nostro_account.account_no }}</div>
-            <div>银行：{{ trace.nostro_account.bank_name }}</div>
-            <div>余额：{{ trace.nostro_account.balance }} {{ trace.nostro_account.currency }}</div>
-          </el-card>
-        </el-col>
-      </el-row>
     </div>
-  </el-card>
+
+    <div v-if="order" class="next-banner">
+      <div class="next-label">
+        <el-icon><Promotion /></el-icon>
+        {{ $t('pages.fundTrace.whereNext') }}
+      </div>
+      <div class="next-title">{{ nextTitle }}</div>
+      <a class="next-link" @click.prevent="scrollToTarget">{{ nextLinkLabel }}</a>
+      <div class="next-hint">{{ nextHint }}</div>
+    </div>
+
+    <div v-if="matches.length" id="beneficiary-section" class="page-card">
+      <div class="section-head">
+        <div class="section-title">{{ $t('pages.fundTrace.beneficiary') }}</div>
+        <a class="new-search" @click.prevent="reset">{{ $t('pages.fundTrace.newSearch') }}</a>
+      </div>
+      <div class="match-hint">{{ $t('pages.fundTrace.foundMatches', { n: matchCount }) }}</div>
+      <el-table :data="matches" :row-class-name="rowClass">
+        <el-table-column prop="order_no" :label="$t('pages.fundTrace.orderNo')" min-width="190" />
+        <el-table-column prop="beneficiary_name" :label="$t('pages.fundTrace.name')" min-width="140">
+          <template #default="{ row }">{{ dash(row.beneficiary_name) }}</template>
+        </el-table-column>
+        <el-table-column prop="beneficiary_bank" :label="$t('pages.fundTrace.bank')" min-width="140">
+          <template #default="{ row }">{{ dash(row.beneficiary_bank) }}</template>
+        </el-table-column>
+        <el-table-column :label="$t('pages.fundTrace.amount')" min-width="140">
+          <template #default="{ row }">{{ moneyLabel(row.amount, row.to_currency || row.from_currency) }}</template>
+        </el-table-column>
+        <el-table-column :label="$t('common.status')" width="120">
+          <template #default="{ row }"><StatusPill :value="row.status" /></template>
+        </el-table-column>
+        <el-table-column :label="$t('common.actions')" width="120" fixed="right">
+          <template #default="{ row }">
+            <el-button type="primary" size="small" round @click="pickOrder(row)">{{ $t('pages.fundTrace.trace') }}</el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+    </div>
+
+    <div v-if="order" id="collection-va-section" class="page-card">
+      <div class="va-title">
+        <div class="section-title" style="margin: 0">{{ $t('pages.fundTrace.collectionVa') }}</div>
+        <el-tag v-if="va?.va_type" type="info" size="small" effect="plain" round>{{ va.va_type }}</el-tag>
+      </div>
+      <el-descriptions v-if="va" :column="3" border style="margin-top: 12px">
+        <el-descriptions-item :label="$t('pages.fundTrace.vaNumber')">{{ dash(va.va_number) }}</el-descriptions-item>
+        <el-descriptions-item :label="$t('pages.fundTrace.bank')">{{ dash(va.bank_name) }}</el-descriptions-item>
+        <el-descriptions-item :label="$t('pages.fundTrace.accountHolder')">{{ dash(va.account_holder) }}</el-descriptions-item>
+        <el-descriptions-item :label="$t('common.currency')">{{ dash(va.currency) }}</el-descriptions-item>
+        <el-descriptions-item :label="$t('pages.fundTrace.ledgerBalance')">{{ moneyLabel(va.ledger_balance, va.currency) }}</el-descriptions-item>
+        <el-descriptions-item :label="$t('pages.fundTrace.availableBalance')">{{ moneyLabel(va.available_balance, va.currency) }}</el-descriptions-item>
+        <el-descriptions-item :label="$t('pages.fundTrace.routing')">{{ dash(va.routing_code) }}</el-descriptions-item>
+        <el-descriptions-item :label="$t('common.status')">{{ dash(va.status) }}</el-descriptions-item>
+        <el-descriptions-item :label="$t('pages.fundTrace.masterAccount')">{{ dash(va.master_account_no) }}</el-descriptions-item>
+        <el-descriptions-item :label="$t('pages.fundTrace.masterBalance')">{{ moneyLabel(va.master_balance, va.currency) }}</el-descriptions-item>
+      </el-descriptions>
+      <div v-else class="match-hint" style="margin-top: 12px">{{ $t('pages.fundTrace.noVa') }}</div>
+    </div>
+  </div>
 </template>
 
 <script setup>
-import { ref, reactive, computed } from 'vue'
+import { computed, ref } from 'vue'
 import { ElMessage } from 'element-plus'
+import { Search } from '@element-plus/icons-vue'
+import { useI18n } from 'vue-i18n'
+import PageHeader from '@/components/PageHeader.vue'
+import EmptyState from '@/components/EmptyState.vue'
+import StatusPill from '@/components/StatusPill.vue'
 import { traceFund } from '@/api/orders'
+import { money } from '@/utils/format'
 
+const { t, te } = useI18n()
 const loading = ref(false)
-const trace = ref(null)
-const pendingOrders = ref([])
-const q = reactive({
-  order_no: '', merchant_order_no: '', prn: '', beneficiary_name: '', remitter_name: ''
+const keyword = ref('')
+const order = ref(null)
+const matches = ref([])
+const matchCount = ref(0)
+
+const va = computed(() => order.value?.virtual_account || null)
+
+const hopCode = computed(() => order.value?.next_hop?.code || '')
+const hopTarget = computed(() => order.value?.next_hop?.target || 'beneficiary')
+
+const nextTitle = computed(() => {
+  const key = `pages.fundTrace.next.${hopCode.value}.title`
+  return te(key) ? t(key) : ''
+})
+const nextHint = computed(() => {
+  const key = `pages.fundTrace.next.${hopCode.value}.hint`
+  return te(key) ? t(key) : ''
+})
+const nextLinkLabel = computed(() => {
+  const key = `pages.fundTrace.nextTarget.${hopTarget.value}`
+  const label = te(key) ? t(key) : t('pages.fundTrace.nextTarget.beneficiary')
+  return `> ${label}`
 })
 
-const steps = [
-  { key: 'created', title: '创建', desc: '订单创建' },
-  { key: 'review', title: '复核', desc: '运营审核' },
-  { key: 'collect', title: '收款', desc: '资金入账' },
-  { key: 'route', title: '路由', desc: '通道选择' },
-  { key: 'clear', title: '清算', desc: '清算处理' },
-  { key: 'credit', title: '入账', desc: '完成入账' },
-]
+function dash(v) {
+  return v === null || v === undefined || v === '' ? '—' : v
+}
 
-const stepActive = computed(() => {
-  if (!trace.value) return 0
-  const idx = steps.findIndex((s) => s.key === trace.value.current_step)
-  return idx < 0 ? 0 : idx + 1
-})
+function moneyLabel(amount, currency) {
+  return `${money(amount)} ${currency || ''}`.trim()
+}
 
-async function search() {
-  const params = Object.fromEntries(Object.entries(q).filter(([, v]) => v))
-  if (!Object.keys(params).length) {
-    ElMessage.warning('请至少填写一个查询条件')
+function amountLabel(row) {
+  const ccy = row.to_currency || row.from_currency || ''
+  const pair = row.from_currency && row.to_currency ? ` (${row.from_currency} -> ${row.to_currency})` : ''
+  return `${money(row.amount)} ${ccy}${pair}`
+}
+
+function rowClass({ row }) {
+  return order.value && row.order_no === order.value.order_no ? 'is-current' : ''
+}
+
+async function load(selectedOrderNo) {
+  const q = keyword.value.trim()
+  if (!q) {
+    ElMessage.warning(t('pages.fundTrace.keywordRequired'))
     return
   }
   loading.value = true
-  pendingOrders.value = []
-  trace.value = null
   try {
-    const data = await traceFund(params)
-    if (data.pending_orders) {
-      pendingOrders.value = data.pending_orders
-      ElMessage.info('命中多笔，请点击选择')
-    } else {
-      trace.value = data
-    }
+    const data = await traceFund({ q, selected_order_no: selectedOrderNo || undefined })
+    matches.value = data.matches || []
+    matchCount.value = data.match_count ?? matches.value.length
+    order.value = data.order || null
+  } catch {
+    matches.value = []
+    matchCount.value = 0
+    order.value = null
   } finally {
     loading.value = false
   }
 }
-async function pickOrder(row) {
-  const data = await traceFund({ order_no: row.order_no })
-  pendingOrders.value = []
-  trace.value = data
+
+function search() {
+  load()
+}
+
+function pickOrder(row) {
+  load(row.order_no)
+}
+
+function reset() {
+  keyword.value = ''
+  order.value = null
+  matches.value = []
+  matchCount.value = 0
+}
+
+function scrollToTarget() {
+  const target = hopTarget.value
+  const id = target === 'collection_va' ? 'collection-va-section' : 'beneficiary-section'
+  document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
 }
 </script>
 
 <style scoped>
-.card-title { font-weight: 600; }
-.toolbar { margin-bottom: 16px; display: flex; gap: 8px; flex-wrap: wrap; }
+.search-hero { max-width: 860px; margin: 0 auto 24px; }
+.search-row { display: flex; gap: 12px; align-items: center; }
+.search-row :deep(.el-input) { flex: 1; }
+.page-card { margin-bottom: 16px; }
+.section-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 4px;
+}
+.section-head .section-title { margin: 0; }
+.new-search {
+  color: #4a90e2;
+  cursor: pointer;
+  font-size: 13px;
+}
+.match-hint {
+  color: #8c8c8c;
+  font-size: 13px;
+  margin: 4px 0 12px;
+}
+.next-banner {
+  background: #f3faf4;
+  border: 1px solid #d8eedc;
+  border-left: 4px solid #67c23a;
+  border-radius: 10px;
+  padding: 16px 18px;
+  margin-bottom: 16px;
+}
+.next-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #67c23a;
+  font-size: 13px;
+  font-weight: 600;
+}
+.next-title {
+  font-weight: 700;
+  color: #2e7d32;
+  margin: 8px 0 6px;
+  font-size: 15px;
+}
+.next-link {
+  color: #67c23a;
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 13px;
+}
+.next-hint {
+  color: #8c8c8c;
+  font-size: 13px;
+  margin-top: 6px;
+}
+.va-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+:deep(.is-current td) {
+  background: #fdf6ef !important;
+}
 </style>

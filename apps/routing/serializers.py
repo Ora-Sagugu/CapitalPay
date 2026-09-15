@@ -45,11 +45,12 @@ class BankChannelCreateUpdateSerializer(serializers.Serializer):
 
 class BankTransactionSerializer(serializers.ModelSerializer):
     bank_name = serializers.CharField(source="bank.bank_name", read_only=True)
+    bank_code = serializers.CharField(source="bank.bank_code", read_only=True)
 
     class Meta:
         model = BankTransaction
         fields = [
-            "id", "bank", "bank_name", "txn_date", "prn",
+            "id", "bank", "bank_code", "bank_name", "txn_date", "prn",
             "beneficiary_name", "amount", "currency", "fee", "balance", "created_at"
         ]
 

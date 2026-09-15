@@ -1,6 +1,6 @@
 """支付交易 — Django Admin 注册。"""
 from django.contrib import admin
-from .models import PaymentOrder, RefundOrder
+from .models import BankCreditNotification, PaymentOrder, RefundOrder
 
 
 @admin.register(PaymentOrder)
@@ -18,3 +18,15 @@ class RefundOrderAdmin(admin.ModelAdmin):
     list_filter = ["status", "created_at"]
     search_fields = ["refund_no", "payment_order__order_no"]
     ordering = ["-created_at"]
+
+
+@admin.register(BankCreditNotification)
+class BankCreditNotificationAdmin(admin.ModelAdmin):
+    list_display = [
+        "notification_no", "prn_code", "order_no", "merchant_name",
+        "bank_name", "amount", "currency", "status", "txn_time",
+    ]
+    list_filter = ["status", "source", "currency"]
+    search_fields = ["notification_no", "prn_code", "order_no", "merchant_name", "txn_id"]
+    ordering = ["-txn_time"]
+    readonly_fields = ["notification_no", "txn_id", "raw_payload"]

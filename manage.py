@@ -7,6 +7,9 @@ import sys
 def main():
     """Run administrative tasks."""
     os.environ.setdefault("DJANGO_SETTINGS_MODULE", "b2b_payment.settings.local")
+    from b2b_payment.db import install_pymysql
+
+    install_pymysql()
     try:
         from django.core.management import execute_from_command_line
     except ImportError as exc:

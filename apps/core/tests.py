@@ -153,9 +153,9 @@ class BusinessExceptionTest(TestCase):
 
     def test_exception_attributes(self):
         """异常应携带错误码和消息。"""
-        exc = BusinessException(ErrorCode.MERCHANT_NOT_FOUND, "商户不存在", 404)
+        exc = BusinessException(ErrorCode.MERCHANT_NOT_FOUND, "The customer does not exist", 404)
         self.assertEqual(exc.code, ErrorCode.MERCHANT_NOT_FOUND)
-        self.assertEqual(exc.message, "商户不存在")
+        self.assertEqual(exc.message, "The customer does not exist")
         self.assertEqual(exc.http_status, 404)
 
     def test_exception_default_message(self):

@@ -5,12 +5,20 @@ from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from django.utils import timezone
-from .models import NostroAccount, FundTransfer, UserPaymentDetail, DepositRequest, VirtualAccount
+from .models import (
+    NostroAccount, FundTransfer, UserPaymentDetail, DepositRequest,
+    VirtualAccount, AgentDisbursement, DisbursementApproval,
+)
 from .serializers import (
     NostroAccountSerializer, FundTransferSerializer, UserPaymentDetailSerializer,
-    DepositRequestSerializer, VirtualAccountSerializer,
+    DepositRequestSerializer, VirtualAccountSerializer, AgentDisbursementSerializer,
 )
-from .services import AccountService
+from .services import (
+    AccountService, DisbursementService,
+    group_virtual_accounts_by_customer, parse_page_params,
+    serialize_virtual_account_transactions,
+)
+from apps.rbac.permissions import RequiresFeature
 
 
 def build_account_transactions(account):
@@ -85,9 +93,10 @@ TRANSFER_STATUS_MAP = {
 }
 
 
-class NostroAccountViewSet(viewsets.ModelViewSet):
+class NostroAccountViewSet(RequiresFeature, viewsets.ModelViewSet):
     """Nostro 账户管理 — 支持增删改查、充值、注销、交易流水。"""
-    queryset = NostroAccount.objects.filter(is_deleted=False).select_related("merchant")
+    feature_code = "feature:accounts"
+    queryset = NostroAccount.objects.filter(is_deleted=False).select_related("merchant", "agent")
     serializer_class = NostroAccountSerializer
 
     def get_queryset(self):
@@ -95,6 +104,9 @@ class NostroAccountViewSet(viewsets.ModelViewSet):
         merchant_id = self.request.query_params.get("merchant_id")
         if merchant_id:
             qs = qs.filter(merchant_id=merchant_id)
+        agent_id = self.request.query_params.get("agent_id")
+        if agent_id:
+            qs = qs.filter(agent_id=agent_id)
         currency = self.request.query_params.get("currency")
         if currency:
             qs = qs.filter(currency=currency)
@@ -116,14 +128,14 @@ class NostroAccountViewSet(viewsets.ModelViewSet):
         try:
             amount = Decimal(str(amount_str))
         except (ValueError, TypeError):
-            return Response({"detail": "请输入有效的充值金额"}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"detail": "A valid credit amount is required"}, status=status.HTTP_400_BAD_REQUEST)
         if amount <= 0:
-            return Response({"detail": "充值金额必须大于 0"}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"detail": "The credit amount must be greater than zero"}, status=status.HTTP_400_BAD_REQUEST)
 
         account.balance = account.balance + amount
         account.save(update_fields=["balance", "updated_at"])
         return Response({
-            "message": f"充值成功，{account.currency} +{amount:,.2f}",
+            "message": f"The credit has been posted: {account.currency} +{amount:,.2f}",
             "balance": str(account.balance),
             "currency": account.currency,
         })
@@ -134,14 +146,14 @@ class NostroAccountViewSet(viewsets.ModelViewSet):
         account = self.get_object()
         reason = request.data.get("reason", "").strip()
         if not reason:
-            return Response({"detail": "请填写注销原因"}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"detail": "Grounds for closure are required"}, status=status.HTTP_400_BAD_REQUEST)
 
         account.is_active = False
         account.closed_at = timezone.now()
         account.close_reason = reason
         account.save(update_fields=["is_active", "closed_at", "close_reason", "updated_at"])
         return Response({
-            "message": f"账户 {account.account_no} 已注销",
+            "message": f"Account {account.account_no} has been closed",
             "closed_at": str(account.closed_at),
         })
 
@@ -153,15 +165,36 @@ class NostroAccountViewSet(viewsets.ModelViewSet):
         return Response({
             "account_no": account.account_no,
             "bank_name": account.bank_name,
+            "bank_code": account.bank_code,
             "currency": account.currency,
             "balance": str(account.balance),
             "transactions": transactions,
             "count": len(transactions),
         })
 
+    @action(detail=False, methods=["get"], url_path="stats")
+    def stats(self, request):
+        qs = NostroAccount.objects.filter(is_deleted=False)
+        currencies = list(qs.values_list("currency", flat=True).distinct())
+        by_ccy = {}
+        for row in qs.values("currency").annotate(total=db_models.Sum("balance")):
+            by_ccy[row["currency"]] = float(row["total"] or 0)
+        return Response({
+            "total": qs.count(),
+            "active": qs.filter(is_active=True).count(),
+            "currency_count": len(currencies),
+            "currencies": currencies,
+            "balances": by_ccy,
+            "cny_total": by_ccy.get("CNY", 0),
+            "usd_total": by_ccy.get("USD", 0),
+            "hkd_total": by_ccy.get("HKD", 0),
+            "eur_total": by_ccy.get("EUR", 0),
+        })
 
-class FundTransferViewSet(viewsets.ModelViewSet):
+
+class FundTransferViewSet(RequiresFeature, viewsets.ModelViewSet):
     """资金调拨管理。"""
+    feature_code = "feature:fund_transfers"
     queryset = FundTransfer.objects.filter(is_deleted=False)
     serializer_class = FundTransferSerializer
     lookup_field = "transfer_no"
@@ -173,11 +206,12 @@ class FundTransferViewSet(viewsets.ModelViewSet):
         """执行资金调拨。"""
         transfer = self.get_object()
         self.service.execute_transfer(transfer)
-        return Response({"message": "调拨执行成功"})
+        return Response({"message": "The internal fund transfer has been executed"})
 
 
-class UserPaymentDetailViewSet(viewsets.ReadOnlyModelViewSet):
+class UserPaymentDetailViewSet(RequiresFeature, viewsets.ReadOnlyModelViewSet):
     """用户支付明细查询。"""
+    feature_code = "feature:users"
     serializer_class = UserPaymentDetailSerializer
 
     def get_queryset(self):
@@ -189,9 +223,13 @@ class UserPaymentDetailViewSet(viewsets.ReadOnlyModelViewSet):
         ).select_related("order").order_by("-pay_time")
 
 
-class DepositRequestViewSet(viewsets.ModelViewSet):
+class DepositRequestViewSet(RequiresFeature, viewsets.ModelViewSet):
     """存款/入账管理 — 客户提交存款请求，运营审核。审核通过后资金自动划入账户。"""
-    queryset = DepositRequest.objects.filter(is_deleted=False).select_related("merchant", "account")
+    feature_code = "feature:deposits"
+    ACTION_FEATURES = {
+        "review": "feature:deposits.approve",
+    }
+    queryset = DepositRequest.objects.filter(is_deleted=False).select_related("merchant", "agent", "account")
     serializer_class = DepositRequestSerializer
     lookup_field = "deposit_no"
     lookup_url_kwarg = "deposit_no"
@@ -212,45 +250,40 @@ class DepositRequestViewSet(viewsets.ModelViewSet):
             qs = qs.filter(
                 db_models.Q(deposit_no__icontains=search) |
                 db_models.Q(merchant__merchant_name__icontains=search) |
+                db_models.Q(agent__agent_name__icontains=search) |
                 db_models.Q(remark__icontains=search)
             )
         return qs.order_by("-created_at")
 
     @action(detail=True, methods=["post"], url_path="review")
     def review(self, request, deposit_no=None):
-        """审核存款 — approve/reject。通过后自动划入账户余额。"""
+        """审核存款 — approve/reject。通过后贷记客户 VA / 代理币种池。"""
+        from apps.account.services import AccountService
+
         deposit = self.get_object()
         action_type = request.data.get("action")
         if action_type not in ("approve", "reject"):
             return Response(
-                {"detail": "action 必须为 approve 或 reject"},
+                {"detail": "action must be approve or reject"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        if deposit.status != "PENDING":
-            return Response(
-                {"detail": f"该存款请求状态为 {deposit.status}，无法审核"},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
+        reviewer = request.data.get("reviewed_by", "") or getattr(request.user, "username", "")
+        service = AccountService()
         if action_type == "reject":
-            reason = request.data.get("reason", "").strip()
-            if not reason:
-                return Response({"detail": "拒绝时必须提供拒绝原因"}, status=status.HTTP_400_BAD_REQUEST)
-            deposit.status = "REJECTED"
-            deposit.review_comment = reason
+            deposit = service.reject_deposit(
+                deposit,
+                reviewer=reviewer,
+                reason=request.data.get("reason", ""),
+            )
         else:
-            deposit.status = "APPROVED"
-            # 审核通过 — 自动划入账户余额
-            if deposit.account and deposit.account.is_active:
-                deposit.account.balance = deposit.account.balance + deposit.amount
-                deposit.account.save(update_fields=["balance", "updated_at"])
-
-        deposit.reviewed_by = request.data.get("reviewed_by", "") or getattr(request.user, "username", "")
-        deposit.reviewed_at = timezone.now()
-        deposit.save(update_fields=["status", "reviewed_by", "reviewed_at", "review_comment", "updated_at"])
+            deposit = service.approve_deposit(
+                deposit,
+                reviewer=reviewer,
+                comment=request.data.get("reason", "") or request.data.get("comment", ""),
+            )
 
         return Response({
-            "message": f"存款已{'通过' if action_type == 'approve' else '拒绝'}",
+            "message": f"The deposit has been {'approved' if action_type == 'approve' else 'rejected'}",
             "status": deposit.status,
             "amount": str(deposit.amount),
             "currency": deposit.currency,
@@ -297,14 +330,15 @@ class DepositRequestViewSet(viewsets.ModelViewSet):
         })
 
 
-class VirtualAccountViewSet(viewsets.ModelViewSet):
+class VirtualAccountViewSet(RequiresFeature, viewsets.ModelViewSet):
     """虚拟账户 (Virtual Account) 管理 — 伞形母账户下的逻辑分账子账号。
 
     支持增删改查、停用/启用/注销、交易流水、统计。
     """
+    feature_code = "feature:virtual_accounts"
     queryset = (
         VirtualAccount.objects.filter(is_deleted=False)
-        .select_related("master_account", "merchant", "order")
+        .select_related("master_account", "merchant", "agent", "order")
     )
     serializer_class = VirtualAccountSerializer
 
@@ -313,6 +347,9 @@ class VirtualAccountViewSet(viewsets.ModelViewSet):
         merchant_id = self.request.query_params.get("merchant_id")
         if merchant_id:
             qs = qs.filter(merchant_id=merchant_id)
+        agent_id = self.request.query_params.get("agent_id")
+        if agent_id:
+            qs = qs.filter(agent_id=agent_id)
         va_type = self.request.query_params.get("va_type")
         if va_type:
             qs = qs.filter(va_type=va_type)
@@ -329,6 +366,7 @@ class VirtualAccountViewSet(viewsets.ModelViewSet):
                 | db_models.Q(reference__icontains=search)
                 | db_models.Q(label__icontains=search)
                 | db_models.Q(merchant__merchant_name__icontains=search)
+                | db_models.Q(merchant__merchant_no__icontains=search)
             )
         return qs
 
@@ -397,6 +435,15 @@ class VirtualAccountViewSet(viewsets.ModelViewSet):
             "status": va.status,
         })
 
+    @action(detail=False, methods=["get"], url_path="by-customer")
+    def by_customer(self, request):
+        """按客户汇总虚拟账户 — 一行一个 Customer，详情含该客户全部 VA。"""
+        matched = self.get_queryset().filter(merchant_id__isnull=False)
+        page, page_size = parse_page_params(
+            request.query_params.get("page"), request.query_params.get("page_size"),
+        )
+        return Response(group_virtual_accounts_by_customer(matched, page=page, page_size=page_size))
+
     @action(detail=False, methods=["get"], url_path="stats")
     def stats(self, request):
         """虚拟账户统计 — 按状态/类型聚合。"""
@@ -415,24 +462,109 @@ class VirtualAccountViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=["get"], url_path="transactions")
     def transactions(self, request, pk=None):
-        """虚拟账户交易流水 — 即其母账户流水(账实分离)。"""
-        va = self.get_object()
-        master = va.master_account
-        if not master:
-            return Response({
-                "va_number": va.va_number,
-                "currency": va.currency,
-                "balance": "0",
-                "transactions": [],
-                "count": 0,
-            })
-        txns = build_account_transactions(master)
+        """虚拟账户交易流水 — 优先返回分类账分录。"""
+        return Response(serialize_virtual_account_transactions(self.get_object()))
+
+
+class AgentDisbursementViewSet(RequiresFeature, viewsets.ModelViewSet):
+    """代理资金拨付 — 双授权 + 二审后自动出金。"""
+    feature_code = "feature:disbursements"
+    ACTION_FEATURES = {
+        "approve": "feature:disbursements.approve",
+        "reject": "feature:disbursements.approve",
+        "execute": "feature:disbursements.approve",
+    }
+    queryset = AgentDisbursement.objects.filter(is_deleted=False).select_related("agent").prefetch_related("approvals")
+    serializer_class = AgentDisbursementSerializer
+    lookup_field = "disbursement_no"
+    lookup_url_kwarg = "disbursement_no"
+    service = DisbursementService()
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        status_param = self.request.query_params.get("status")
+        if status_param:
+            qs = qs.filter(status=status_param)
+        agent_id = self.request.query_params.get("agent") or self.request.query_params.get("agent_id")
+        if agent_id:
+            qs = qs.filter(agent_id=agent_id)
+        search = self.request.query_params.get("search")
+        if search:
+            qs = qs.filter(
+                db_models.Q(disbursement_no__icontains=search)
+                | db_models.Q(agent__agent_name__icontains=search)
+                | db_models.Q(payee_account_no__icontains=search)
+            )
+        return qs
+
+    def _operator(self, request):
+        return (
+            request.data.get("approver")
+            or request.data.get("operator")
+            or getattr(request.user, "username", "")
+            or "system"
+        )
+
+    def _step_for(self, disbursement):
+        if disbursement.status == AgentDisbursement.DisbursementStatus.PENDING_FIRST_APPROVAL:
+            return DisbursementApproval.ApprovalStep.FIRST
+        if disbursement.status == AgentDisbursement.DisbursementStatus.PENDING_SECOND_APPROVAL:
+            return DisbursementApproval.ApprovalStep.SECOND
+        return None
+
+    @action(detail=True, methods=["post"], url_path="approve")
+    def approve(self, request, disbursement_no=None):
+        from apps.core.exceptions import BusinessException
+        disbursement = self.get_object()
+        step = request.data.get("step") or self._step_for(disbursement)
+        if not step:
+            return Response({"detail": "The current status does not permit authorisation"}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            disbursement = self.service.approve(
+                disbursement, step, self._operator(request), request.data.get("comment") or "",
+            )
+        except BusinessException as e:
+            return Response({"code": e.code, "message": e.message}, status=e.http_status)
+        auto_executed = False
+        if disbursement.status == AgentDisbursement.DisbursementStatus.APPROVED:
+            try:
+                disbursement = self.service.execute(disbursement)
+                auto_executed = True
+            except BusinessException as e:
+                disbursement.refresh_from_db()
+                return Response({
+                    "message": "Second authorisation succeeded, but automated payout failed",
+                    "status": disbursement.status,
+                    "code": e.code,
+                    "fail_reason": disbursement.fail_reason or e.message,
+                    "auto_executed": False,
+                }, status=status.HTTP_400_BAD_REQUEST)
         return Response({
-            "va_number": va.va_number,
-            "account_no": master.account_no,
-            "bank_name": master.bank_name,
-            "currency": va.currency or master.currency,
-            "balance": str(master.balance),
-            "transactions": txns,
-            "count": len(txns),
+            "message": "Authorisation recorded",
+            "status": disbursement.status,
+            "auto_executed": auto_executed,
         })
+
+    @action(detail=True, methods=["post"], url_path="reject")
+    def reject(self, request, disbursement_no=None):
+        from apps.core.exceptions import BusinessException
+        disbursement = self.get_object()
+        step = request.data.get("step") or self._step_for(disbursement)
+        if not step:
+            return Response({"detail": "The current status does not permit rejection"}, status=status.HTTP_400_BAD_REQUEST)
+        comment = (request.data.get("comment") or request.data.get("reason") or "").strip()
+        try:
+            disbursement = self.service.reject(disbursement, step, self._operator(request), comment)
+        except BusinessException as e:
+            return Response({"code": e.code, "message": e.message}, status=e.http_status)
+        return Response({"message": "The disbursement has been rejected", "status": disbursement.status})
+
+    @action(detail=True, methods=["post"], url_path="execute")
+    def execute(self, request, disbursement_no=None):
+        from apps.core.exceptions import BusinessException
+        disbursement = self.get_object()
+        try:
+            disbursement = self.service.execute(disbursement)
+        except BusinessException as e:
+            return Response({"code": e.code, "message": e.message, "fail_reason": getattr(disbursement, "fail_reason", "")}, status=e.http_status)
+        return Response({"message": "The disbursement has been executed", "status": disbursement.status})

@@ -40,10 +40,11 @@ class RefundService:
             PaymentOrder.OrderStatus.PAY_RECEIVED,
             PaymentOrder.OrderStatus.PENDING_SETTLE,
             PaymentOrder.OrderStatus.SETTLED,
+            PaymentOrder.OrderStatus.COMPLETED,
             PaymentOrder.OrderStatus.REFUNDING,
         ]
         if payment_order.status not in valid_statuses:
-            raise BusinessException(ErrorCode.ORDER_STATUS_INVALID, "当前订单状态不可退款")
+            raise BusinessException(ErrorCode.ORDER_STATUS_INVALID, "The current instruction status does not permit a refund")
 
         # ── 校验退款金额 ──
         refunded_total = RefundOrder.objects.filter(
@@ -61,10 +62,11 @@ class RefundService:
             raise BusinessException(ErrorCode.REFUND_EXCEED_AMOUNT)
 
         if refund_amount <= 0:
-            raise BusinessException("REFUND_AMOUNT_INVALID", "退款金额必须大于 0")
+            raise BusinessException("REFUND_AMOUNT_INVALID", "The refund amount must be greater than zero")
 
         # ── 创建退款单 ──
-        fee_rate = RefundFeeConfig.get_fee_rate()
+        fee_rate = Decimal(str(RefundFeeConfig.get_fee_rate() or 0))
+        refund_amount = Decimal(str(refund_amount))
         fee_amount = (refund_amount * fee_rate / Decimal("100")).quantize(Decimal("0.01"))
 
         refund = RefundOrder(
@@ -91,7 +93,7 @@ class RefundService:
     def approve_refund(self, refund: RefundOrder, reviewer: str) -> RefundOrder:
         """审核通过。"""
         if refund.status != RefundOrder.RefundStatus.PENDING_REVIEW:
-            raise BusinessException(ErrorCode.ORDER_STATUS_INVALID, "退款单状态不可审核")
+            raise BusinessException(ErrorCode.ORDER_STATUS_INVALID, "The refund instruction is not in a reviewable status")
 
         refund.status = RefundOrder.RefundStatus.APPROVED
         refund.reviewed_by = reviewer
@@ -135,7 +137,7 @@ class RefundService:
         for entry in reversed(history):
             if isinstance(entry, dict):
                 s = entry.get("status", "")
-                if s and s != PaymentOrder.OrderStatus.REFUNDING:
+                if s and s != PaymentOrder.OrderStatus.REFUNDING and s in PaymentOrder.OrderStatus.values:
                     return s
         # 无法确定原始状态时，回退到安全的默认值
         return PaymentOrder.OrderStatus.PAY_RECEIVED
@@ -163,6 +165,8 @@ class RefundService:
                 refund.bank_refund_id = result.get("bank_refund_id", "")
                 refund.refunded_at = timezone.now()
                 refund.save(update_fields=["status", "bank_refund_id", "refunded_at"])
+                self._record_refund_movement(refund, order)
+                self._reverse_collection_ledger(refund, order)
 
                 # 检查是否全额退款完成
                 if self._is_fully_refunded(order):
@@ -170,7 +174,7 @@ class RefundService:
                     order.save(update_fields=["status"])
             else:
                 refund.status = RefundOrder.RefundStatus.FAILED
-                refund.fail_reason = result.get("message", "银行退款失败")
+                refund.fail_reason = result.get("message", "The bank refund was unsuccessful")
                 refund.save(update_fields=["status", "fail_reason"])
 
         except Exception as e:
@@ -179,6 +183,70 @@ class RefundService:
             refund.save(update_fields=["status", "fail_reason"])
 
         return refund
+
+    def _record_refund_movement(self, refund: RefundOrder, order: PaymentOrder):
+        from apps.account.models import MoneyMovement
+        from apps.account.money_movements import MoneyMovementService
+
+        MoneyMovementService().record(
+            movement_type=MoneyMovement.MovementType.REFUND,
+            amount=refund.refund_amount,
+            currency=order.from_currency or order.currency or "",
+            source_type="REFUND",
+            source_id=str(refund.id),
+            status=MoneyMovement.MovementStatus.SUCCESS,
+            evidence_level=(
+                MoneyMovement.EvidenceLevel.BANK_CONFIRMED
+                if refund.bank_refund_id
+                else MoneyMovement.EvidenceLevel.SYSTEM_CONFIRMED
+            ),
+            occurred_at=refund.refunded_at,
+            from_party_type="PLATFORM",
+            to_party_type="PAYER",
+            to_party_id=order.user_id or "",
+            bank_code=order.bank_code or "",
+            bank_txn_id=refund.bank_refund_id or "",
+            payment_order=order,
+            refund_order=refund,
+            remark=f"Refund {refund.refund_no}",
+        )
+
+    def _reverse_collection_ledger(self, refund: RefundOrder, order: PaymentOrder):
+        from apps.account.models import VaLedgerEntry
+        from apps.account.services import AccountService
+
+        credit = (
+            VaLedgerEntry.objects.filter(
+                order=order,
+                entry_type=VaLedgerEntry.EntryType.CREDIT,
+                source_type="PAYMENT",
+                is_deleted=False,
+            )
+            .select_related("virtual_account")
+            .first()
+        )
+        if not credit:
+            return
+        try:
+            AccountService().post_va_entry(
+                virtual_account=credit.virtual_account,
+                amount=refund.refund_amount,
+                entry_type=VaLedgerEntry.EntryType.DEBIT,
+                order=order,
+                remark=f"Refund reversal {refund.refund_no}",
+                source_type="REFUND",
+                source_id=str(refund.id),
+            )
+            AccountService().debit_agent_pool_for_outflow(
+                merchant=order.merchant,
+                amount=refund.refund_amount,
+                currency=credit.virtual_account.currency or order.currency or "CNY",
+                origin_source="REFUND",
+                origin_id=str(refund.id),
+                remark=f"Refund {refund.refund_no}",
+            )
+        except Exception:
+            pass
 
     def _is_fully_refunded(self, order: PaymentOrder) -> bool:
         """检查订单是否已全额退款。"""
@@ -194,4 +262,4 @@ class RefundService:
         try:
             return RefundOrder.objects.get(refund_no=refund_no, is_deleted=False)
         except RefundOrder.DoesNotExist:
-            raise BusinessException("REFUND_NOT_FOUND", "退款单不存在")
+            raise BusinessException("REFUND_NOT_FOUND", "The refund instruction does not exist")

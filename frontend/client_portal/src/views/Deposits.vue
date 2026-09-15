@@ -1,89 +1,132 @@
 <template>
-  <el-card class="page-card" shadow="never">
-    <div class="toolbar">
-      <el-input v-model="filters.search" placeholder="入账号 / 商户" clearable style="width: 220px" @keyup.enter="reload" />
-      <el-select v-model="filters.status" placeholder="状态" clearable style="width: 140px" @change="reload">
-        <el-option label="待审核" value="PENDING" />
-        <el-option label="已通过" value="APPROVED" />
-        <el-option label="已拒绝" value="REJECTED" />
-      </el-select>
-      <el-select v-model="filters.currency" placeholder="币种" clearable style="width: 120px" @change="reload">
-        <el-option v-for="c in currencies" :key="c" :label="c" :value="c" />
-      </el-select>
-      <el-button type="primary" @click="reload">查询</el-button>
-    </div>
-    <el-table :data="rows" v-loading="loading" border stripe>
-      <el-table-column prop="deposit_no" label="入账号" min-width="160" />
-      <el-table-column prop="merchant_name" label="商户" min-width="140" />
-      <el-table-column prop="amount" label="金额" min-width="110" />
-      <el-table-column prop="currency" label="币种" width="90" />
-      <el-table-column prop="status" label="状态" width="120" />
-      <el-table-column prop="created_at" label="申请时间" min-width="160" />
-      <el-table-column label="操作" width="180" fixed="right">
-        <template #default="{ row }">
-          <template v-if="row.status === 'PENDING'">
-            <el-button link type="success" @click="review(row, 'approve')">通过</el-button>
-            <el-button link type="danger" @click="review(row, 'reject')">拒绝</el-button>
+  <div>
+    <PageHeader title="Deposits" subtitle="Customer deposit (credit) applications" />
+    <KpiCards :items="kpis" />
+    <div class="page-card">
+      <div class="toolbar">
+        <el-input v-model="filters.search" placeholder="Reference / customer / narrative" clearable style="width: 220px" @keyup.enter="reload" />
+        <el-select v-model="filters.currency" placeholder="Currency" clearable style="width: 120px" @change="reload">
+          <el-option v-for="c in CURRENCIES" :key="c.value" :label="c.value" :value="c.value" />
+        </el-select>
+        <el-select v-model="filters.status" placeholder="Status" clearable style="width: 130px" @change="reload">
+          <el-option label="Pending review" value="PENDING" /><el-option label="Approved" value="APPROVED" /><el-option label="Rejected" value="REJECTED" />
+        </el-select>
+        <el-button type="primary" @click="openCreate">Create deposit transfer</el-button>
+        <el-button @click="reload">Refresh</el-button>
+      </div>
+      <el-table :data="rows" v-loading="loading">
+        <el-table-column prop="deposit_no" label="Deposit reference" min-width="150" />
+        <el-table-column label="Source" min-width="120">
+          <template #default="{ row }">{{ row.source === 'AGENT_SELF' ? 'Agent' : 'Customer' }}</template>
+        </el-table-column>
+        <el-table-column prop="merchant_name" label="Customer name" min-width="140" />
+        <el-table-column prop="agent_name" label="Agent" min-width="140" />
+        <el-table-column prop="account_no" label="Linked account" min-width="140" />
+        <el-table-column prop="currency" label="Currency" min-width="110" />
+        <el-table-column prop="amount" label="Amount" min-width="110" :formatter="formatMoneyCell" />
+        <el-table-column label="Status" width="100"><template #default="{ row }"><StatusPill kind="deposit" :value="row.status" /></template></el-table-column>
+        <el-table-column prop="reviewed_by" label="Reviewing officer" min-width="100" />
+        <el-table-column label="Reviewed at" min-width="160"><template #default="{ row }">{{ datetime(row.reviewed_at) }}</template></el-table-column>
+        <el-table-column prop="remark" label="Narrative" min-width="120" />
+        <el-table-column label="Creation Time" min-width="160"><template #default="{ row }">{{ datetime(row.created_at) }}</template></el-table-column>
+        <el-table-column label="Actions" width="160" fixed="right">
+          <template #default="{ row }">
+            <el-button v-if="row.status === 'PENDING' && canApprove" link type="success" @click="review(row, 'approve')">Approve</el-button>
+            <el-button v-if="row.status === 'PENDING' && canApprove" link type="danger" @click="review(row, 'reject')">Reject</el-button>
           </template>
-        </template>
-      </el-table-column>
-    </el-table>
-    <el-pagination class="toolbar" background layout="total, prev, pager, next" :total="total" :page-size="pageSize" :current-page="page" @current-change="onPage" />
-  </el-card>
+        </el-table-column>
+      </el-table>
+      <el-pagination class="toolbar" background layout="total, prev, pager, next" :total="total" :page-size="pageSize" :current-page="page" @current-change="onPage" />
+    </div>
+    <el-dialog v-model="visible" title="Create deposit transfer" width="480px">
+      <el-form :model="form" label-width="100px">
+        <el-form-item label="Customer">
+          <el-select v-model="form.merchant" filterable style="width: 100%">
+            <el-option v-for="m in merchants" :key="m.id" :label="m.merchant_name" :value="m.id" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="Account">
+          <el-select v-model="form.account" filterable style="width: 100%">
+            <el-option v-for="a in accounts" :key="a.id" :label="`${a.account_no} ${a.currency}`" :value="a.id" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="Currency">
+          <el-select v-model="form.currency" style="width: 100%"><el-option v-for="c in CURRENCIES" :key="c.value" :label="c.label" :value="c.value" /></el-select>
+        </el-form-item>
+        <el-form-item label="Amount"><el-input v-model="form.amount" /></el-form-item>
+        <el-form-item label="Narrative"><el-input v-model="form.remark" /></el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="visible = false">Cancel</el-button>
+        <el-button type="primary" @click="save">Submit</el-button>
+      </template>
+    </el-dialog>
+  </div>
 </template>
 
 <script setup>
-import { ref, reactive, onMounted } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { getDeposits, reviewDeposit } from '@/api/accounts'
+import PageHeader from '@/components/PageHeader.vue'
+import KpiCards from '@/components/KpiCards.vue'
+import StatusPill from '@/components/StatusPill.vue'
+import { getDeposits, getDepositStats, createDeposit, reviewDeposit, getNostroAccounts } from '@/api/accounts'
+import { getMerchants } from '@/api/merchants'
+import { unwrapList, datetime, CURRENCIES, formatMoneyCell } from '@/utils/format'
+import { useAuthStore } from '@/store/auth'
 
-const currencies = ['USD', 'EUR', 'GBP', 'CNY', 'JPY', 'HKD']
+const auth = useAuthStore()
+const canApprove = computed(() => auth.hasPermission('feature:deposits.approve'))
+
 const rows = ref([])
+const stats = ref({})
+const merchants = ref([])
+const accounts = ref([])
 const total = ref(0)
 const page = ref(1)
-const pageSize = ref(20)
+const pageSize = 20
 const loading = ref(false)
-const filters = reactive({ search: '', status: '', currency: '' })
-
+const visible = ref(false)
+const filters = reactive({ search: '', currency: '', status: '' })
+const form = reactive({ merchant: '', account: '', currency: 'USD', amount: '', remark: '' })
+const kpis = computed(() => [
+  { label: 'Total deposit instructions', value: stats.value.total_count ?? 0 },
+  { label: 'Pending review', value: stats.value.pending ?? 0 },
+  { label: 'Approved', value: stats.value.approved ?? 0 },
+  { label: 'Credited today', value: stats.value.today_approved ?? 0 }
+])
 async function load() {
   loading.value = true
   try {
-    const data = await getDeposits({
-      page: page.value,
-      page_size: pageSize.value,
-      search: filters.search || undefined,
-      status: filters.status || undefined,
-      currency: filters.currency || undefined
-    })
-    rows.value = data.results || []
-    total.value = data.count || 0
-  } finally {
-    loading.value = false
-  }
+    stats.value = await getDepositStats()
+    const data = await getDeposits({ page: page.value, page_size: pageSize, search: filters.search || undefined, currency: filters.currency || undefined, status: filters.status || undefined })
+    const u = unwrapList(data)
+    rows.value = u.rows
+    total.value = u.total
+  } finally { loading.value = false }
 }
-function reload() {
-  page.value = 1
-  load()
-}
-function onPage(p) {
-  page.value = p
+function reload() { page.value = 1; load() }
+function onPage(p) { page.value = p; load() }
+function openCreate() { visible.value = true }
+async function save() {
+  await createDeposit(form)
+  ElMessage.success('The deposit-transfer application has been submitted.')
+  visible.value = false
   load()
 }
 async function review(row, action) {
   let reason = ''
   if (action === 'reject') {
-    const { value } = await ElMessageBox.prompt('拒绝原因', '拒绝入账', { inputPattern: /.+/ })
+    const { value } = await ElMessageBox.prompt('Enter the grounds for rejection', 'Reject', { inputPattern: /.+/, inputErrorMessage: 'A rejection reason is required.' })
     reason = value
-  } else {
-    await ElMessageBox.confirm(`确认通过入账 ${row.deposit_no}？`, '审核')
   }
   await reviewDeposit(row.deposit_no, { action, reason })
-  ElMessage.success(action === 'approve' ? '已入账' : '已拒绝')
+  ElMessage.success('The deposit-transfer application has been processed.')
   load()
 }
-onMounted(load)
+onMounted(async () => {
+  merchants.value = unwrapList(await getMerchants({ page_size: 100 })).rows
+  accounts.value = unwrapList(await getNostroAccounts({ page_size: 100 })).rows
+  load()
+})
 </script>
-
-<style scoped>
-.toolbar { margin-bottom: 16px; display: flex; gap: 8px; flex-wrap: wrap; }
-</style>

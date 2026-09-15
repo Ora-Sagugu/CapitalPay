@@ -1,86 +1,85 @@
 <template>
   <div>
-    <el-row :gutter="16">
-      <el-col :span="6" v-for="item in cards" :key="item.label">
-        <el-card class="page-card" shadow="hover">
-          <div class="stat-label">{{ item.label }}</div>
-          <div class="stat-value">{{ item.value }}</div>
-        </el-card>
-      </el-col>
-    </el-row>
+    <PageHeader title="Overview" :subtitle="dateLabel" />
+    <KpiCards :items="topCards" />
+    <KpiCards :items="midCards" :span="8" />
 
-    <el-card class="page-card" style="margin-top: 16px" shadow="never">
-      <template #header><span class="card-title">订单概况</span></template>
-      <div ref="chartRef" style="height: 280px"></div>
-    </el-card>
-
-    <el-card class="page-card" style="margin-top: 16px" shadow="never">
-      <template #header><span class="card-title">最新汇款</span></template>
-      <el-table :data="latest" v-loading="loadingLatest" border stripe>
-        <el-table-column prop="order_no" label="订单号" min-width="180" />
-        <el-table-column prop="merchant_name" label="商户" min-width="140" />
-        <el-table-column prop="amount" label="金额" width="110" />
-        <el-table-column prop="status" label="状态" width="130" />
-        <el-table-column prop="beneficiary_name" label="收款人" min-width="120" />
-        <el-table-column prop="created_at" label="时间" min-width="160" />
-      </el-table>
-    </el-card>
+    <div class="page-card">
+      <div class="chart-head">
+        <div class="section-title">Daily remittance volume</div>
+        <div class="chart-tools">
+          <el-radio-group v-model="chartType" size="small" @change="renderChart">
+            <el-radio-button value="area">Area</el-radio-button>
+            <el-radio-button value="bar">Bar</el-radio-button>
+          </el-radio-group>
+          <el-radio-group v-model="range" size="small" @change="load">
+            <el-radio-button value="7d">7 days</el-radio-button>
+            <el-radio-button value="1m">1 month</el-radio-button>
+            <el-radio-button value="3m">3 months</el-radio-button>
+            <el-radio-button value="6m">6 months</el-radio-button>
+          </el-radio-group>
+        </div>
+      </div>
+      <div ref="chartRef" style="height: 320px" />
+    </div>
   </div>
 </template>
 
 <script setup>
-import { ref, onMounted, onBeforeUnmount, computed } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import * as echarts from 'echarts'
-import { getOrderStats } from '@/api/dashboard'
-import { getOrders } from '@/api/orders'
+import PageHeader from '@/components/PageHeader.vue'
+import KpiCards from '@/components/KpiCards.vue'
+import { getDashboard } from '@/api/dashboard'
+import { formatLongDate, money } from '@/utils/format'
 
-const stats = ref({ pending_review: 0, pending_pay: 0, completed_count: 0, today_amount: 0 })
+const dateLabel = formatLongDate()
+const stats = ref({})
 const chartRef = ref(null)
-const latest = ref([])
-const loadingLatest = ref(false)
+const chartType = ref('area')
+const range = ref('7d')
 let chart = null
 
-const cards = computed(() => [
-  { label: '待审核订单', value: stats.value.pending_review },
-  { label: '待支付订单', value: stats.value.pending_pay },
-  { label: '已完成笔数', value: stats.value.completed_count },
-  { label: '今日金额', value: stats.value.today_amount }
+const topCards = computed(() => [
+  { label: 'Remittances today', value: stats.value.today_remittance?.count ?? 0, hint: `Aggregate amount: $${money(stats.value.today_remittance?.amount)}`, icon: 'Sort', bg: '#eaf3ff', color: '#4a90e2' },
+  { label: 'Outstanding', value: stats.value.pending?.count ?? 0, hint: 'Pending review / authorised', icon: 'Clock', bg: '#fff3e8', color: '#f08040' },
+  { label: 'Completed', value: stats.value.completed?.count ?? 0, hint: 'Transferred / completed', icon: 'CircleCheck', bg: '#e9f8ef', color: '#67c23a' },
+  { label: 'Failed', value: stats.value.failed?.count ?? 0, hint: 'Rejected / refunded / cancelled', icon: 'CircleClose', bg: '#fdecee', color: '#d0021b' }
+])
+const midCards = computed(() => [
+  { label: 'Customers', value: stats.value.customers_total ?? 0, icon: 'User', bg: '#f3e8ff', color: '#9b59b6', span: 8 },
+  { label: 'Agents', value: stats.value.agents_total ?? 0, icon: 'UserFilled', bg: '#e9f8ef', color: '#67c23a', span: 8 },
+  { label: 'Remittance volume', value: stats.value.orders_total ?? 0, icon: 'Document', bg: '#eaf3ff', color: '#4a90e2', span: 8 }
 ])
 
 function renderChart() {
   if (!chartRef.value) return
   if (!chart) chart = echarts.init(chartRef.value)
-  chart.setOption({
-    tooltip: { trigger: 'axis' },
-    grid: { left: 40, right: 20, top: 30, bottom: 30 },
-    xAxis: { type: 'category', data: ['待审核', '待支付', '已完成'] },
+  const trend = stats.value.trend || []
+  const option = {
+    tooltip: { trigger: 'axis', valueFormatter: (v) => money(v) },
+    grid: { left: 48, right: 20, top: 24, bottom: 32 },
+    xAxis: { type: 'category', data: trend.map((d) => d.date), boundaryGap: chartType.value === 'bar' },
     yAxis: { type: 'value' },
     series: [{
-      type: 'bar',
-      data: [stats.value.pending_review, stats.value.pending_pay, stats.value.completed_count],
-      itemStyle: { color: '#1890ff', borderRadius: [4, 4, 0, 0] },
-      barWidth: 40
+      type: chartType.value === 'bar' ? 'bar' : 'line',
+      data: trend.map((d) => d.amount),
+      smooth: true,
+      areaStyle: chartType.value === 'area' ? { color: 'rgba(240,128,64,0.25)' } : undefined,
+      itemStyle: { color: '#f08040' },
+      lineStyle: { color: '#f08040', width: 2 },
+      barWidth: 18
     }]
-  })
+  }
+  chart.setOption(option, true)
 }
 
 async function load() {
-  try {
-    stats.value = await getOrderStats()
-    renderChart()
-  } catch (e) { /* interceptor */ }
-  loadingLatest.value = true
-  try {
-    const data = await getOrders({ page: 1, page_size: 8, ordering: '-created_at' })
-    latest.value = data.results || []
-  } finally {
-    loadingLatest.value = false
-  }
+  stats.value = await getDashboard({ range: range.value })
+  renderChart()
 }
 
-function resize() {
-  chart && chart.resize()
-}
+function resize() { chart && chart.resize() }
 
 onMounted(() => {
   load()
@@ -93,7 +92,6 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
-.stat-label { color: #8c8c8c; font-size: 14px; }
-.stat-value { font-size: 28px; font-weight: 700; margin-top: 8px; color: #1890ff; }
-.card-title { font-weight: 600; }
+.chart-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+.chart-tools { display: flex; gap: 10px; }
 </style>

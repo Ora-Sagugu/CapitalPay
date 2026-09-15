@@ -13,6 +13,7 @@ class MerchantDailyReportSerializer(serializers.ModelSerializer):
             "id", "report_date", "merchant", "merchant_name",
             "total_orders", "total_amount", "total_fee",
             "total_refunds", "total_refund_amount", "net_amount",
+            "currency", "data_watermark",
         ]
         read_only_fields = fields
 
@@ -23,6 +24,7 @@ class ChannelFeeReportSerializer(serializers.ModelSerializer):
         fields = [
             "id", "report_date", "bank_code", "bank_name",
             "total_orders", "total_amount", "channel_fee", "platform_fee",
+            "currency", "data_watermark",
         ]
         read_only_fields = fields
 
@@ -33,7 +35,7 @@ class PlatformOrderSummarySerializer(serializers.ModelSerializer):
         fields = [
             "id", "report_date", "total_merchants", "total_orders",
             "total_amount", "total_fee", "total_refunds",
-            "total_refund_amount", "settled_amount",
+            "total_refund_amount", "settled_amount", "currency", "data_watermark",
         ]
         read_only_fields = fields
 
@@ -64,5 +66,5 @@ class SettlementBatchReportSerializer(serializers.ModelSerializer):
         fields = [
             "batch_no", "merchant_no", "merchant_name", "settle_date",
             "total_count", "total_amount", "fee_total", "settle_net_amount",
-            "status", "settled_at", "created_at",
+            "status", "settled_at", "created_at", "currency", "bank_txn_id",
         ]
