@@ -47,7 +47,7 @@ const topCards = computed(() => [
   { label: 'Failed', value: stats.value.failed?.count ?? 0, hint: 'Rejected / refunded / cancelled', icon: 'CircleClose', bg: '#fdecee', color: '#d0021b' }
 ])
 const midCards = computed(() => [
-  { label: 'Customers', value: stats.value.customers_total ?? 0, icon: 'User', bg: '#f3e8ff', color: '#9b59b6', span: 8 },
+  { label: 'Merchants', value: stats.value.customers_total ?? 0, icon: 'User', bg: '#f3e8ff', color: '#9b59b6', span: 8 },
   { label: 'Agents', value: stats.value.agents_total ?? 0, icon: 'UserFilled', bg: '#e9f8ef', color: '#67c23a', span: 8 },
   { label: 'Remittance volume', value: stats.value.orders_total ?? 0, icon: 'Document', bg: '#eaf3ff', color: '#4a90e2', span: 8 }
 ])

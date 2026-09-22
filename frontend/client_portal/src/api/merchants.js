@@ -12,6 +12,12 @@ export function getMerchant(merchantNo) {
 export function updateMerchant(merchantNo, data) {
   return request.patch(`/v1/admin/merchants/${merchantNo}/`, data)
 }
+export function activateMerchant(merchantNo, data = {}) {
+  return request.post(`/v1/admin/merchants/${merchantNo}/activate/`, data)
+}
+export function suspendMerchant(merchantNo, data = {}) {
+  return request.post(`/v1/admin/merchants/${merchantNo}/suspend/`, data)
+}
 export function getMerchantStats() {
   return request.get('/v1/admin/merchants/stats/')
 }

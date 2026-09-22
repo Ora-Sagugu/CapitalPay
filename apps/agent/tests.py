@@ -5,13 +5,11 @@ from django.test import TestCase
 from django.utils import timezone
 from rest_framework.test import APIClient
 
-from apps.agent.models import Agent
-from apps.merchant.models import Merchant
+from apps.agent.models import Agent, AgentCustomer
 from apps.payment.models import PaymentOrder
 from apps.rbac.models import SystemUser
 from apps.rbac.testing import attach_super_admin
 from apps.settlement.engine.calculator import SettlementCalculator
-from apps.user_portal.models import EndUser, UserOnboarding
 
 
 class ManualAgentCodeApiTests(TestCase):
@@ -69,43 +67,6 @@ class ManualAgentCodeApiTests(TestCase):
         )
         self.assertEqual(variant.status_code, 400, variant.content)
 
-    def test_patch_syncs_onboarding_agent_code(self):
-        agent = Agent.objects.create(agent_no="kP8mQ2xR", agent_name="Referral Agent")
-        customer = EndUser.objects.create(
-            username="cust-sync",
-            email="cust-sync@example.com",
-            phone="13900000991",
-            password_hash="x",
-            portal_role="customer",
-        )
-        UserOnboarding.objects.create(
-            user=customer,
-            legal_name="Lagos Imports Ltd",
-            agent_code="kp8mq2xr",
-        )
-        other = EndUser.objects.create(
-            username="cust-other",
-            email="cust-other@example.com",
-            phone="13900000992",
-            password_hash="x",
-            portal_role="customer",
-        )
-        UserOnboarding.objects.create(
-            user=other,
-            legal_name="Other Ltd",
-            agent_code="OTHERCODE",
-        )
-        response = self.client.patch(
-            f"/api/v1/admin/agents/{agent.id}/",
-            {"agent_no": "AG20260099"},
-            format="json",
-        )
-        self.assertEqual(response.status_code, 200, response.content)
-        customer.onboarding.refresh_from_db()
-        other.onboarding.refresh_from_db()
-        self.assertEqual(customer.onboarding.agent_code, "AG20260099")
-        self.assertEqual(other.onboarding.agent_code, "OTHERCODE")
-
 
 class AgentFeeShareApiTests(TestCase):
     def setUp(self):
@@ -122,11 +83,10 @@ class AgentFeeShareApiTests(TestCase):
             agent_name="Fee Agent",
             commission_rate=Decimal("0.500000"),
         )
-        self.merchant = Merchant.objects.create(
-            merchant_no="MFEE01",
-            merchant_name="Fee Customer",
-            status=Merchant.Status.ACTIVE,
+        self.customer = AgentCustomer.objects.create(
             agent=self.agent,
+            legal_name="Fee Customer",
+            kyc_status=AgentCustomer.KycStatus.APPROVED,
         )
 
     def test_patch_commission_rate_and_reject_out_of_range(self):
@@ -155,7 +115,9 @@ class AgentFeeShareApiTests(TestCase):
             merchant_order_no="M_FEE_USD",
             unique_identification_no="UIN_FEE_USD",
             idempotency_key="IDEM_FEE_USD",
-            merchant=self.merchant,
+            merchant=None,
+            agent=self.agent,
+            agent_customer=self.customer,
             amount=Decimal("100.00"),
             currency="USD",
             from_currency="USD",
@@ -169,7 +131,9 @@ class AgentFeeShareApiTests(TestCase):
             merchant_order_no="M_FEE_EUR",
             unique_identification_no="UIN_FEE_EUR",
             idempotency_key="IDEM_FEE_EUR",
-            merchant=self.merchant,
+            merchant=None,
+            agent=self.agent,
+            agent_customer=self.customer,
             amount=Decimal("50.00"),
             currency="EUR",
             from_currency="EUR",

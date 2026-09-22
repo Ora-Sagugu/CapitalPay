@@ -27,7 +27,7 @@ class Agent(BaseModel):
     contact_email = models.EmailField("联系邮箱", blank=True)
     commission_rate = models.DecimalField(
         "佣金比例", max_digits=8, decimal_places=6, default=0,
-        help_text="该代理名下客户交易手续费的分成比例，0.50 表示 50%",
+        help_text="Share of (Remittance Fee − bank Computed fee). 0.50 means 50%.",
     )
     max_merchant_count = models.IntegerField("最大商户数", default=0)  # 0=无限制
 
@@ -165,6 +165,7 @@ class AgentKYC(BaseModel):
     reviewed_by = models.CharField(max_length=64, blank=True, verbose_name="审核人")
     reviewed_at = models.DateTimeField(null=True, blank=True, verbose_name="审核时间")
     review_comment = models.CharField(max_length=256, blank=True, verbose_name="审核意见")
+    kyb_snapshot = models.JSONField(default=dict, blank=True, verbose_name="入驻KYB快照")
 
     class Meta:
         db_table = "agent_kyc"
@@ -192,3 +193,67 @@ class AgentKYC(BaseModel):
         self.reviewed_at = timezone.now()
         self.review_comment = comment
         self.save(update_fields=["kyc_status", "reviewed_by", "reviewed_at", "review_comment", "updated_at"])
+
+
+class AgentCustomer(BaseModel):
+    """Merchant-owned customer profile — no portal login and no independent wallet."""
+
+    class KycStatus(models.TextChoices):
+        DRAFT = "draft", "草稿"
+        SUBMITTED = "submitted", "已提交"
+        APPROVED = "approved", "通过"
+        REJECTED = "rejected", "驳回"
+
+    merchant = models.ForeignKey(
+        "merchant.Merchant",
+        on_delete=models.PROTECT,
+        related_name="customers",
+        verbose_name="商户",
+        null=True,
+        blank=True,
+    )
+    agent = models.ForeignKey(
+        Agent,
+        on_delete=models.PROTECT,
+        related_name="customers",
+        verbose_name="代理商",
+        null=True,
+        blank=True,
+    )
+    customer_no = models.CharField("客户编号", max_length=32, unique=True, db_index=True)
+    legal_name = models.CharField("客户名称", max_length=128)
+    contact_name = models.CharField("联系人", max_length=64, blank=True)
+    contact_phone = models.CharField("联系电话", max_length=20, blank=True)
+    contact_email = models.EmailField("联系邮箱", blank=True)
+    id_type = models.CharField("证件类型", max_length=32, blank=True)
+    id_number = models.CharField("证件号", max_length=64, blank=True)
+    nationality = models.CharField("国籍", max_length=64, blank=True)
+    address = models.CharField("地址", max_length=256, blank=True)
+    license_expiry_date = models.DateField("证照到期日", null=True, blank=True)
+    kyb_payload = models.JSONField("KYB资料", default=dict, blank=True)
+    kyc_status = models.CharField(
+        "KYC状态", max_length=16, choices=KycStatus.choices, default=KycStatus.DRAFT,
+    )
+    kyc_remark = models.CharField("KYC备注", max_length=512, blank=True)
+    reviewed_at = models.DateTimeField("审核时间", null=True, blank=True)
+    reviewer = models.CharField("审核人", max_length=64, blank=True)
+    bank_name = models.CharField("银行名称", max_length=128, blank=True)
+    branch_name = models.CharField("分行", max_length=128, blank=True)
+    account_name = models.CharField("账户名", max_length=128, blank=True)
+    bank_account = models.CharField("银行账号", max_length=64, blank=True)
+    swift_code = models.CharField("SWIFT", max_length=16, blank=True)
+
+    class Meta:
+        db_table = "agent_customer"
+        verbose_name = "商户客户"
+        verbose_name_plural = verbose_name
+        ordering = ["-created_at"]
+
+    def save(self, *args, **kwargs):
+        if not self.customer_no:
+            from apps.agent.services import generate_customer_no
+            self.customer_no = generate_customer_no()
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.customer_no} - {self.legal_name}"

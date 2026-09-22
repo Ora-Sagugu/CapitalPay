@@ -1,17 +1,19 @@
 import axios from 'axios'
 
 const codeMessages = {
-  MERCHANT_PENDING: 'Customer due diligence and product admission remain pending',
+  MERCHANT_PENDING: 'Merchant due diligence and product admission remain pending',
   MERCHANT_SUSPENDED: 'The customer is suspended from transacting',
   LICENSE_EXPIRED: 'The business licence has expired',
-  KYC_NOT_APPROVED: 'Customer due diligence has not been approved',
+  KYC_NOT_APPROVED: 'Merchant due diligence has not been approved',
   PRODUCT_NOT_ENABLED: 'The remittance product has not been enabled',
   FEE_NOT_CONFIGURED: 'A valid remittance tariff has not been configured',
   FX_RATE_UNAVAILABLE: 'The applicable exchange rate is presently unavailable',
   QUOTE_EXPIRED: 'The quotation has expired; generate a new quotation',
-  NO_PAYOUT_BANK: 'No bank has sufficient balance for this remittance',
+  NO_PAYOUT_BANK: 'No bank has sufficient balance and a Bank Fee below Remittance Fee',
   PAYOUT_BANK_INVALID: 'The selected bank is not an active payout channel',
   PAYOUT_BANK_INSUFFICIENT: 'The selected bank does not have sufficient balance',
+  PAYOUT_BANK_FEE_EXCEEDS: 'Bank Fee must be less than Remittance Fee',
+  PAYOUT_BANK_SPLIT_INVALID: "A second bank can only be used when the first bank's remaining balance cannot cover the payout",
   PERMISSION_DENIED: 'The authenticated principal is not authorised for this operation'
 }
 

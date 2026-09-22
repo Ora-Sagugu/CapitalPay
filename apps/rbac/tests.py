@@ -2,6 +2,7 @@
 from django.test import TestCase
 from .models import SystemUser, Role, Permission, UserRole, RolePermission, OperationLog
 from .services import AuthService
+from .functions import DEFAULT_ROLE_CAPABILITIES, ASSIGNABLE_ROLE_CODES
 
 
 class RolePermissionModelTest(TestCase):
@@ -215,8 +216,8 @@ class OpsUserApiGuardTest(TestCase):
             {
                 "username": "newbie",
                 "password": "Pass@123",
-                "real_name": "New Maker",
-                "role_codes": ["maker"],
+                "real_name": "New Ops",
+                "role_codes": ["merchant_ops"],
             },
             format="json",
         )
@@ -241,9 +242,9 @@ class FunctionAssignmentApiTest(TestCase):
         self.svc = AuthService()
         users = self.svc.ensure_ops_rbac()
         self.admin = users["admin"]
-        self.maker = users["maker"]
-        self.checker = users["checker"]
-        self.maker_role = Role.objects.get(code="maker")
+        self.ops = users["ops"]
+        self.compliance = users["compliance"]
+        self.ops_role = Role.objects.get(code="merchant_ops")
         self.admin_role = Role.objects.get(code="super_admin")
 
     def _login(self, username):
@@ -288,17 +289,32 @@ class FunctionAssignmentApiTest(TestCase):
         ]
         self.assertIn("feature:orders", codes)
         self.assertIn("feature:orders.approve", codes)
-        self.assertIn("feature:agent_fees", codes)
+        self.assertIn("feature:merchants.write", codes)
+        self.assertIn("feature:merchants.suspend", codes)
+        self.assertIn("feature:reports.export", codes)
+        self.assertIn("feature:audit_logs", codes)
+        role_codes = {r["code"] for r in listed.data["roles"]}
+        self.assertTrue(set(ASSIGNABLE_ROLE_CODES).issubset(role_codes))
         super_admin = next(r for r in listed.data["roles"] if r["code"] == "super_admin")
         self.assertTrue(super_admin["locked"])
-        maker = next(r for r in listed.data["roles"] if r["code"] == "maker")
+        ops = next(r for r in listed.data["roles"] if r["code"] == "merchant_ops")
         assigned = self.client.put(
-            f"/api/v1/admin/roles/{maker['id']}/capabilities/",
+            f"/api/v1/admin/roles/{ops['id']}/capabilities/",
             {"capability_codes": ["feature:agent_fees"]},
             format="json",
         )
         self.assertEqual(assigned.status_code, 200, assigned.content)
         self.assertEqual(assigned.data["capability_codes"], ["feature:agent_fees"])
+
+    def test_default_matrix_seeded(self):
+        for code, expected in DEFAULT_ROLE_CAPABILITIES.items():
+            role = Role.objects.get(code=code)
+            held = set(
+                RolePermission.objects.filter(
+                    role=role, is_deleted=False, permission__is_deleted=False
+                ).values_list("permission__code", flat=True)
+            )
+            self.assertTrue(set(expected).issubset(held), msg=f"{code} missing defaults")
 
     def test_super_admin_capabilities_are_locked(self):
         self._login("admin")
@@ -310,27 +326,61 @@ class FunctionAssignmentApiTest(TestCase):
         self.assertEqual(blocked.status_code, 400, blocked.content)
         self.assertEqual(blocked.data["code"], "SUPER_ADMIN_LOCKED")
 
-    def test_maker_can_use_assigned_function_only(self):
-        self.svc.set_role_capabilities(self.maker_role, ["feature:orders"])
-        checker_role = Role.objects.get(code="checker")
-        self.svc.set_role_capabilities(checker_role, ["feature:refunds"])
+    def test_create_custom_role_and_assign_capabilities(self):
+        self._login("admin")
+        created = self.client.post(
+            "/api/v1/admin/roles/",
+            {
+                "name": "Treasury Ops",
+                "code": "treasury_ops",
+                "description": "Custom treasury job title",
+            },
+            format="json",
+        )
+        self.assertEqual(created.status_code, 201, created.content)
+        listed = self.client.get("/api/v1/admin/functions/")
+        self.assertEqual(listed.status_code, 200, listed.content)
+        custom = next(r for r in listed.data["roles"] if r["code"] == "treasury_ops")
+        self.assertFalse(custom["locked"])
+        self.assertEqual(custom["name"], "Treasury Ops")
+        assigned = self.client.put(
+            f"/api/v1/admin/roles/{custom['id']}/capabilities/",
+            {"capability_codes": ["feature:wallet", "feature:fund_transfers"]},
+            format="json",
+        )
+        self.assertEqual(assigned.status_code, 200, assigned.content)
+        self.assertEqual(
+            assigned.data["capability_codes"],
+            ["feature:fund_transfers", "feature:wallet"],
+        )
+        reserved = self.client.post(
+            "/api/v1/admin/roles/",
+            {"name": "Clone Ops", "code": "merchant_ops", "description": ""},
+            format="json",
+        )
+        self.assertEqual(reserved.status_code, 400, reserved.content)
 
-        maker = self._login("maker")
-        self.assertIn("feature:orders", maker["user"]["permissions"])
-        self.assertNotIn("feature:refunds", maker["user"]["permissions"])
+    def test_ops_can_use_assigned_function_only(self):
+        self.svc.set_role_capabilities(self.ops_role, ["feature:orders"])
+        compliance_role = Role.objects.get(code="compliance")
+        self.svc.set_role_capabilities(compliance_role, ["feature:refunds"])
+
+        ops = self._login("ops")
+        self.assertIn("feature:orders", ops["user"]["permissions"])
+        self.assertNotIn("feature:refunds", ops["user"]["permissions"])
         orders = self.client.get("/api/v1/admin/orders/")
         self.assertEqual(orders.status_code, 200, orders.content)
         refunds = self.client.get("/api/v1/admin/refunds/")
         self.assertEqual(refunds.status_code, 403)
 
-        self._login("checker")
+        self._login("compliance")
         self.assertEqual(self.client.get("/api/v1/admin/refunds/").status_code, 200)
         self.assertEqual(self.client.get("/api/v1/admin/orders/").status_code, 403)
 
     def test_approve_code_required_for_order_review(self):
         order = self._pending_order()
-        self.svc.set_role_capabilities(self.maker_role, ["feature:orders"])
-        self._login("maker")
+        self.svc.set_role_capabilities(self.ops_role, ["feature:orders"])
+        self._login("ops")
         self.assertEqual(self.client.get("/api/v1/admin/orders/").status_code, 200)
         denied = self.client.post(
             f"/api/v1/admin/orders/{order.order_no}/review/",
@@ -340,7 +390,7 @@ class FunctionAssignmentApiTest(TestCase):
         self.assertEqual(denied.status_code, 403)
 
         self.svc.set_role_capabilities(
-            self.maker_role, ["feature:orders", "feature:orders.approve"]
+            self.ops_role, ["feature:orders", "feature:orders.approve"]
         )
         allowed = self.client.post(
             f"/api/v1/admin/orders/{order.order_no}/review/",
@@ -350,28 +400,79 @@ class FunctionAssignmentApiTest(TestCase):
         self.assertEqual(allowed.status_code, 200, allowed.content)
 
     def test_approve_only_still_opens_the_page(self):
-        self.svc.set_role_capabilities(self.maker_role, ["feature:orders.approve"])
-        self._login("maker")
+        self.svc.set_role_capabilities(self.ops_role, ["feature:orders.approve"])
+        self._login("ops")
         self.assertEqual(self.client.get("/api/v1/admin/orders/").status_code, 200)
 
     def test_agent_fee_capability(self):
-        self.svc.set_role_capabilities(self.maker_role, ["feature:agent_fees"])
-        self._login("maker")
+        self.svc.set_role_capabilities(self.ops_role, ["feature:agent_fees"])
+        self._login("ops")
         fees = self.client.get("/api/v1/admin/agent-commissions/")
         self.assertEqual(fees.status_code, 200, fees.content)
         self.assertEqual(self.client.get("/api/v1/admin/orders/").status_code, 403)
 
     def test_unassign_revokes_access(self):
-        self.svc.set_role_capabilities(self.maker_role, ["feature:orders"])
-        self._login("maker")
+        self.svc.set_role_capabilities(self.ops_role, ["feature:orders"])
+        self._login("ops")
         self.assertEqual(self.client.get("/api/v1/admin/orders/").status_code, 200)
-        self.svc.set_role_capabilities(self.maker_role, [])
-        self._login("maker")
+        self.svc.set_role_capabilities(self.ops_role, [])
+        self._login("ops")
         self.assertEqual(self.client.get("/api/v1/admin/orders/").status_code, 403)
 
     def test_assign_roles_replaces(self):
-        self.svc.assign_roles(self.maker, ["maker", "checker"])
-        self.assertIn("maker", self.svc.get_user_roles(str(self.maker.id)))
-        self.assertIn("checker", self.svc.get_user_roles(str(self.maker.id)))
-        self.svc.assign_roles(self.maker, ["maker"])
-        self.assertEqual(set(self.svc.get_user_roles(str(self.maker.id))), {"maker"})
+        self.svc.assign_roles(self.ops, ["merchant_ops", "compliance"])
+        self.assertIn("merchant_ops", self.svc.get_user_roles(str(self.ops.id)))
+        self.assertIn("compliance", self.svc.get_user_roles(str(self.ops.id)))
+        self.svc.assign_roles(self.ops, ["merchant_ops"])
+        self.assertEqual(set(self.svc.get_user_roles(str(self.ops.id))), {"merchant_ops"})
+
+    def test_legacy_maker_migrates_to_merchant_ops(self):
+        Role.objects.filter(code="maker").update(is_deleted=False)
+        maker, _ = Role.objects.get_or_create(
+            code="maker",
+            defaults={"name": "Maker", "is_system": True},
+        )
+        maker.is_deleted = False
+        maker.save(update_fields=["is_deleted"])
+        legacy_user = self.svc.create_user(
+            username="legacy_maker",
+            password="123456",
+            real_name="Legacy",
+            role_codes=["maker"],
+        )
+        self.svc.ensure_ops_rbac()
+        roles = self.svc.get_user_roles(str(legacy_user.id))
+        self.assertIn("merchant_ops", roles)
+        self.assertNotIn("maker", roles)
+
+    def test_merchant_write_and_suspend_are_separate(self):
+        from apps.merchant.models import Merchant
+
+        merchant = Merchant.objects.create(
+            merchant_no="RBACSUS01",
+            merchant_name="Suspend Target",
+            status=Merchant.Status.ACTIVE,
+        )
+        self.svc.set_role_capabilities(
+            self.ops_role, ["feature:merchants", "feature:merchants.write"]
+        )
+        self._login("ops")
+        self.assertEqual(self.client.get("/api/v1/admin/merchants/").status_code, 200)
+        denied = self.client.post(
+            f"/api/v1/admin/merchants/{merchant.merchant_no}/suspend/",
+            {"reason": "should be denied"},
+            format="json",
+        )
+        self.assertEqual(denied.status_code, 403)
+
+        compliance_role = Role.objects.get(code="compliance")
+        self.svc.set_role_capabilities(
+            compliance_role, ["feature:merchants", "feature:merchants.suspend"]
+        )
+        self._login("compliance")
+        allowed = self.client.post(
+            f"/api/v1/admin/merchants/{merchant.merchant_no}/suspend/",
+            {"reason": "compliance hold"},
+            format="json",
+        )
+        self.assertEqual(allowed.status_code, 200, allowed.content)

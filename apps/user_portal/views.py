@@ -14,7 +14,7 @@ from .serializers import (
     SmsCodeSerializer, ResetPasswordSerializer, RefreshTokenSerializer,
     ProfileUpdateSerializer, IdentityVerifySerializer, ChooseRoleSerializer,
     OnboardingSubmitSerializer, OnboardingReviewSerializer, AgentOrderReviewSerializer,
-    AgentRemittanceQuoteSerializer, AgentRemittanceSubmitSerializer,
+    AgentReferralReviewSerializer, AgentRemittanceQuoteSerializer, AgentRemittanceSubmitSerializer,
     BindMerchantSerializer,
 )
 from .services import UserService
@@ -205,9 +205,89 @@ class UserAgentViewSet(viewsets.ViewSet):
 
     @action(methods=["get"], detail=False, url_path="merchants")
     def merchants(self, request):
+        # #region agent log
+        try:
+            import json as _json, time as _time
+            open(r"d:\ProgramData\b2b_payment_system\.cursor\debug-ce1e79.log", "a", encoding="utf-8").write(
+                _json.dumps({
+                    "sessionId": "ce1e79",
+                    "runId": "post-fix",
+                    "hypothesisId": "F",
+                    "location": "views.py:UserAgentViewSet.merchants:pre_auth",
+                    "message": "merchants view entered",
+                    "data": {
+                        "path": getattr(request, "path", ""),
+                        "has_auth": bool(request.META.get("HTTP_AUTHORIZATION")),
+                    },
+                    "timestamp": int(_time.time() * 1000),
+                }) + "\n"
+            )
+        except Exception:
+            pass
+        # #endregion
         user = self._get_user(request)
+        # #region agent log
+        try:
+            import json as _json, time as _time
+            _agent = getattr(user, "default_agent", None)
+            open(r"d:\ProgramData\b2b_payment_system\.cursor\debug-ce1e79.log", "a", encoding="utf-8").write(
+                _json.dumps({
+                    "sessionId": "ce1e79",
+                    "runId": "post-fix",
+                    "hypothesisId": "A",
+                    "location": "views.py:UserAgentViewSet.merchants:entry",
+                    "message": "agent merchants endpoint hit",
+                    "data": {
+                        "portal_role": getattr(user, "portal_role", ""),
+                        "onboarding_status": getattr(user, "onboarding_status", ""),
+                        "agent_no": getattr(_agent, "agent_no", "") if _agent else "",
+                    },
+                    "timestamp": int(_time.time() * 1000),
+                }) + "\n"
+            )
+        except Exception:
+            pass
+        # #endregion
         items = self.service.list_bound_agent_merchants(user)
-        return Response({"total": len(items), "items": items})
+        # #region agent log
+        try:
+            import json as _json, time as _time
+            open(r"d:\ProgramData\b2b_payment_system\.cursor\debug-ce1e79.log", "a", encoding="utf-8").write(
+                _json.dumps({
+                    "sessionId": "ce1e79",
+                    "runId": "post-fix",
+                    "hypothesisId": "A",
+                    "location": "views.py:UserAgentViewSet.merchants:ok",
+                    "message": "agent merchants listed",
+                    "data": {
+                        "item_count": len(items),
+                        "merchant_nos": [row.get("merchant_no", "") for row in items[:5]],
+                    },
+                    "timestamp": int(_time.time() * 1000),
+                }) + "\n"
+            )
+        except Exception:
+            pass
+        # #endregion
+        return Response(
+            {"total": len(items), "items": items},
+            headers={
+                "Cache-Control": "no-store",
+                "X-Debug-Merchants": "list-bound-v1",
+            },
+        )
+
+    @action(methods=["get"], detail=False, url_path="customers")
+    def customers(self, request):
+        """Read-only customers under merchants bound to this agent."""
+        user = self._get_user(request)
+        items = self.service.list_bound_agent_merchant_customers(user)
+        return Response({
+            "items": items,
+            "results": items,
+            "total": len(items),
+            "count": len(items),
+        })
 
     @action(methods=["get"], detail=False, url_path="virtual-accounts")
     def virtual_accounts(self, request):
@@ -249,7 +329,7 @@ class UserAgentViewSet(viewsets.ViewSet):
     @action(methods=["post"], detail=False, url_path=r"kyc/(?P<user_id>[^/.]+)/review")
     def kyc_review(self, request, user_id=None):
         user = self._get_user(request)
-        s = OnboardingReviewSerializer(data=request.data)
+        s = AgentReferralReviewSerializer(data=request.data)
         s.is_valid(raise_exception=True)
         reviewer_name = getattr(user, "username", "") or getattr(user, "nickname", "")
         return Response(self.service.review_agent_kyc(
@@ -415,6 +495,61 @@ class UserAgentViewSet(viewsets.ViewSet):
         return request.user
 
 
+class UserCustomerViewSet(viewsets.ViewSet):
+    """Merchant-owned customer profiles for remittance."""
+    authentication_classes = [JWTAuthentication]
+    service = UserService()
+
+    def list(self, request):
+        user = self._get_user(request)
+        # #region agent log
+        try:
+            import json as _json, time as _time
+            open(r"d:\ProgramData\b2b_payment_system\.cursor\debug-ce1e79.log", "a", encoding="utf-8").write(
+                _json.dumps({
+                    "sessionId": "ce1e79",
+                    "runId": "post-fix",
+                    "hypothesisId": "B",
+                    "location": "views.py:UserCustomerViewSet.list:entry",
+                    "message": "merchant customers endpoint hit",
+                    "data": {
+                        "portal_role": getattr(user, "portal_role", ""),
+                        "onboarding_status": getattr(user, "onboarding_status", ""),
+                    },
+                    "timestamp": int(_time.time() * 1000),
+                }) + "\n"
+            )
+        except Exception:
+            pass
+        # #endregion
+        items = self.service.list_bound_merchant_customers(user)
+        return Response({"total": len(items), "items": items})
+
+    def create(self, request):
+        user = self._get_user(request)
+        row = self.service.create_merchant_customer(user, request.data)
+        return Response(row, status=status.HTTP_201_CREATED)
+
+    def partial_update(self, request, pk=None):
+        user = self._get_user(request)
+        return Response(self.service.update_merchant_customer(user, pk, request.data))
+
+    def destroy(self, request, pk=None):
+        user = self._get_user(request)
+        self.service.delete_merchant_customer(user, pk)
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    @action(methods=["post"], detail=True, url_path="submit")
+    def submit(self, request, pk=None):
+        user = self._get_user(request)
+        return Response(self.service.submit_merchant_customer(user, pk))
+
+    def _get_user(self, request) -> EndUser:
+        if not request.user or not isinstance(request.user, EndUser):
+            raise BusinessException("UNAUTHORIZED", "Authentication credentials are required", 401)
+        return request.user
+
+
 class UserOnboardingViewSet(viewsets.ViewSet):
     """用户首次登录资料 — 三步向导提交与查询。"""
     authentication_classes = [JWTAuthentication]
@@ -485,7 +620,10 @@ class UserOnboardingAdminViewSet(RequiresFeature, viewsets.ViewSet):
         search = request.query_params.get("search", "")
         page = int(request.query_params.get("page", 1))
         page_size = int(request.query_params.get("page_size", 20))
-        base = EndUser.objects.filter(is_deleted=False).exclude(
+        portal_role = (request.query_params.get("portal_role") or "merchant").strip()
+        if portal_role not in ("merchant", "agent"):
+            portal_role = "merchant"
+        base = EndUser.objects.filter(is_deleted=False, portal_role=portal_role).exclude(
             onboarding_status="none"
         ).select_related(
             "default_merchant", "default_merchant__kyc",
@@ -603,6 +741,7 @@ class UserOnboardingAdminViewSet(RequiresFeature, viewsets.ViewSet):
             "page_size": page_size,
             "items": data,
             "stats": stats,
+            "portal_role": portal_role,
         })
 
     def retrieve(self, request, pk=None):
@@ -634,7 +773,10 @@ class UserOnboardingAdminViewSet(RequiresFeature, viewsets.ViewSet):
         if not user:
             raise BusinessException("USER_NOT_FOUND", "The user does not exist", 404)
 
-        s = OnboardingReviewSerializer(data=request.data)
+        s = OnboardingReviewSerializer(
+            data=request.data,
+            context={"portal_role": user.portal_role or "merchant"},
+        )
         s.is_valid(raise_exception=True)
 
         reviewer_name = getattr(request.user, "username", "")
@@ -643,6 +785,8 @@ class UserOnboardingAdminViewSet(RequiresFeature, viewsets.ViewSet):
             action=s.validated_data["action"],
             remark=s.validated_data.get("remark", ""),
             reviewer=reviewer_name,
+            kyc_tier=s.validated_data.get("kyc_tier") or "",
+            commission_rate=s.validated_data.get("commission_rate"),
         )
         return Response(result)
 
@@ -845,6 +989,19 @@ class UserAccountViewSet(viewsets.ViewSet):
         """Accounts overview: registration Financial Details + added bank cards."""
         user = self._get_user(request)
         return Response(_customer_accounts_overview(user))
+
+    @action(methods=["get"], detail=False, url_path="channels")
+    def channels(self, request):
+        """CapitalPay-supported banks (name + country only)."""
+        self._get_user(request)
+        from apps.routing.models import BankChannel
+
+        items = list(
+            BankChannel.objects.filter(status=BankChannel.Status.ACTIVE)
+            .order_by("bank_name", "bank_code")
+            .values("bank_name", "country")
+        )
+        return Response({"items": items})
 
     @action(methods=["get"], detail=False, url_path="virtual")
     def virtual_accounts(self, request):
@@ -1160,16 +1317,23 @@ class UserPaymentViewSet(viewsets.ViewSet):
         user = self._get_user(request)
         order_no = request.data.get("order_no")
         amount = request.data.get("refund_amount") or request.data.get("amount")
-        reason = request.data.get("reason") or "Customer-initiated refund"
-        from decimal import Decimal
+        reason = (request.data.get("reason") or "").strip() or "Customer-initiated refund"
+        from decimal import Decimal, InvalidOperation
         from apps.payment.models import PaymentOrder
         from apps.payment.services.refund import RefundService
         order = PaymentOrder.objects.filter(order_no=order_no, user_id=str(user.id), is_deleted=False).first()
         if not order:
             raise BusinessException("ORDER_NOT_FOUND", "The payment instruction does not exist")
+        if amount in (None, ""):
+            refund_amount = order.amount
+        else:
+            try:
+                refund_amount = Decimal(str(amount))
+            except (InvalidOperation, TypeError, ValueError):
+                raise BusinessException("REFUND_AMOUNT_INVALID", "The refund amount must be a valid number")
         refund = RefundService().request_refund(
             payment_order=order,
-            refund_amount=Decimal(str(amount)),
+            refund_amount=refund_amount,
             reason=reason,
         )
         return Response({
@@ -1214,19 +1378,13 @@ class UserPaymentViewSet(viewsets.ViewSet):
         user = self._get_user(request)
         if user.onboarding_status != "approved":
             raise BusinessException("ONBOARDING_REQUIRED", "Onboarding review must be completed before a remittance may be initiated", 400)
-        merchant = user.default_merchant
-        if not merchant:
-            raise BusinessException("MERCHANT_NOT_BOUND", "The account has not been bound to a customer; please contact operations", 400)
         from apps.payment.serializers import RemittanceSubmitSerializer, PaymentOrderSerializer
-        from apps.payment.services.remittance_application import RemittanceApplicationService
         serializer = RemittanceSubmitSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        order, created = RemittanceApplicationService().submit(
-            merchant=merchant,
+        order, created = UserService().submit_merchant_remittance(
+            user,
             payload=serializer.validated_data,
             idempotency_key=request.headers.get("Idempotency-Key", ""),
-            user_id=str(user.id),
-            actor_type="CUSTOMER",
         )
         return Response(
             PaymentOrderSerializer(order).data,
@@ -1237,23 +1395,10 @@ class UserPaymentViewSet(viewsets.ViewSet):
         user = self._get_user(request)
         if user.onboarding_status != "approved":
             raise BusinessException("ONBOARDING_REQUIRED", "Preliminary onboarding review must be completed first", 422)
-        merchant = user.default_merchant
-        if not merchant:
-            raise BusinessException("MERCHANT_NOT_BOUND", "The account has not been bound to a customer", 422)
         from apps.payment.serializers import RemittanceQuoteRequestSerializer
-        from apps.payment.services.remittance_quote import RemittanceQuoteService
         serializer = RemittanceQuoteRequestSerializer(data=data)
         serializer.is_valid(raise_exception=True)
-        quote = RemittanceQuoteService().create_quote(
-            merchant=merchant,
-            amount=serializer.validated_data["amount"],
-            from_currency=serializer.validated_data["from_currency"],
-            to_currency=serializer.validated_data["to_currency"],
-            fee_bearing=serializer.validated_data["fee_bearing"],
-            actor_type="CUSTOMER",
-            user_id=str(user.id),
-        )
-        return RemittanceQuoteService.serialize(quote)
+        return UserService().create_merchant_remittance_quote(user, serializer.validated_data)
 
     @action(methods=["post"], detail=False, url_path="quote")
     def quote_remittance(self, request):
@@ -1290,6 +1435,13 @@ class UserPaymentViewSet(viewsets.ViewSet):
                 result["name_hits"], result["address_hits"], result.get("country_hits", [])
             ),
         })
+
+    @action(methods=["get"], detail=False, url_path="remittances/stats")
+    def remittance_stats(self, request):
+        """Merchant Overview: remittance count, volume, success rate, fees."""
+        user = self._get_user(request)
+        period = (request.query_params.get("period") or "month").strip()
+        return Response(UserService().merchant_remittance_overview(user, period=period))
 
     @action(methods=["get"], detail=False, url_path="remittances")
     def remittances(self, request):

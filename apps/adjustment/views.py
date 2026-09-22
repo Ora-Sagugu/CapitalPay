@@ -17,6 +17,10 @@ class AdjustmentApplicationViewSet(RequiresFeature, viewsets.ViewSet):
     permission_classes = [IsAuthenticated]
     feature_code = "feature:adjustments"
     ACTION_FEATURES = {
+        "create": "feature:adjustments.approve",
+        "update": "feature:adjustments.approve",
+        "partial_update": "feature:adjustments.approve",
+        "destroy": "feature:adjustments.approve",
         "approve": "feature:adjustments.approve",
         "reject": "feature:adjustments.approve",
     }

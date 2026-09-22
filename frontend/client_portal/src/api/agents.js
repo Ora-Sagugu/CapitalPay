@@ -21,6 +21,9 @@ export function suspendAgent(id) {
 export function getAgentMerchants(params) {
   return request.get('/v1/admin/agent-merchants/', { params })
 }
+export function getAgentCustomers(params) {
+  return request.get('/v1/admin/agent-customers/', { params })
+}
 export function createAgentMerchant(data) {
   return request.post('/v1/admin/agent-merchants/', data)
 }

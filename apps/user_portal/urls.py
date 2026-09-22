@@ -2,7 +2,7 @@
 from rest_framework.routers import DefaultRouter
 from .views import (
     UserAuthViewSet, UserProfileViewSet, UserAgentViewSet,
-    UserAccountViewSet, UserPaymentViewSet,
+    UserAccountViewSet, UserPaymentViewSet, UserCustomerViewSet,
     UserOnboardingViewSet, UserOnboardingAdminViewSet,
 )
 
@@ -12,6 +12,7 @@ router.register(r"profile", UserProfileViewSet, basename="user-profile")
 router.register(r"agent", UserAgentViewSet, basename="user-agent")
 router.register(r"accounts", UserAccountViewSet, basename="user-account")
 router.register(r"payments", UserPaymentViewSet, basename="user-payment")
+router.register(r"customers", UserCustomerViewSet, basename="user-customer")
 router.register(r"onboarding", UserOnboardingViewSet, basename="user-onboarding")
 router.register(r"admin/onboarding", UserOnboardingAdminViewSet, basename="user-onboarding-admin")
 

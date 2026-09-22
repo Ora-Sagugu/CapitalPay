@@ -149,7 +149,7 @@ def _apply_match(notification: BankCreditNotification, order: PaymentOrder | Non
     notification.merchant_name = getattr(merchant, "merchant_name", "") or ""
     if not notification.prn_code:
         notification.prn_code = order.prn_code or ""
-    expected = Decimal(order.amount).quantize(Decimal("0.01"))
+    expected = order.expected_collection_amount()
     notification.status = (
         BankCreditNotification.Status.MATCHED
         if notification.amount == expected
@@ -241,7 +241,7 @@ def simulate_credit(payload: dict) -> BankCreditNotification:
     order = _find_order(prn, order_no)
     if order:
         if amount in (None, ""):
-            amount = order.amount
+            amount = order.expected_collection_amount()
         if not currency:
             currency = order.from_currency or order.currency
         if not prn_code:

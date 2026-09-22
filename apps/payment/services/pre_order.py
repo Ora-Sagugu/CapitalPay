@@ -107,7 +107,8 @@ class PreOrderService:
         product = products.filter(product_type=pay_method, is_enabled=True).first()
         if not product:
             raise BusinessException("PRODUCT_DISABLED", "This payment product has not been enabled")
-        if product.max_single_amount and amount > product.max_single_amount:
+        max_single = merchant.max_single_amount
+        if max_single is not None and amount > max_single:
             raise BusinessException("AMOUNT_EXCEED_LIMIT", "The amount exceeds the single-instruction limit")
 
     def _select_route(self, amount, currency, order_no) -> str:

@@ -7,6 +7,8 @@ from apps.payment.models import PaymentOrder, RefundOrder
 from apps.settlement.models import SettlementBatch
 from apps.merchant.models import Merchant
 from apps.param.services import resolve_channel_rate
+from apps.routing.models import BankChannel
+from apps.routing.services import RoutingService
 from .models import MerchantDailyReport, ChannelFeeReport, PlatformOrderSummary
 
 
@@ -97,7 +99,18 @@ class ReportGenerator:
                 )
                 total = agg["total"] or Decimal("0")
                 fee = agg["fee"] or Decimal("0")
-                channel_fee = total * resolve_channel_rate(bank_code)
+                channel = BankChannel.objects.filter(bank_code=bank_code).first()
+                if channel:
+                    channel_fee = sum(
+                        (
+                            RoutingService._channel_fee(channel, Decimal(str(order.amount or 0)))
+                            for order in scoped.iterator()
+                        ),
+                        Decimal("0"),
+                    )
+                else:
+                    rate = resolve_channel_rate(bank_code)
+                    channel_fee = total * rate
                 report, _ = ChannelFeeReport.objects.update_or_create(
                     report_date=report_date,
                     bank_code=bank_code,

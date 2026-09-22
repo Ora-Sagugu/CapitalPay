@@ -165,6 +165,7 @@ class MerchantKYC(BaseModel):
     )
     remark = models.TextField(blank=True, verbose_name="审核备注")
     reviewed_at = models.DateTimeField(null=True, blank=True, verbose_name="审核时间")
+    kyb_snapshot = models.JSONField(default=dict, blank=True, verbose_name="入驻KYB快照")
 
     class Meta:
         db_table = "merchant_kyc"

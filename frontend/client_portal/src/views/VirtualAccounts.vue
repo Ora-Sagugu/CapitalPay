@@ -1,18 +1,18 @@
 <template>
   <div>
-    <PageHeader title="Virtual Accounts" subtitle="Customer collection VAs linked to a pooled nostro" />
+    <PageHeader title="Virtual Accounts" subtitle="Merchant collection VAs linked to a pooled nostro" />
     <KpiCards :items="kpis" />
     <div class="page-card">
       <div class="toolbar">
-        <el-input v-model="filters.search" placeholder="Customer / VA number" clearable style="width: 220px" @keyup.enter="reload" />
+        <el-input v-model="filters.search" placeholder="Merchant / VA number" clearable style="width: 220px" @keyup.enter="reload" />
         <el-select v-model="filters.status" placeholder="Status" clearable style="width: 140px" @change="reload">
           <el-option label="Active" value="ACTIVE" /><el-option label="Inactive" value="INACTIVE" /><el-option label="Revoked" value="REVOKED" />
         </el-select>
         <el-button @click="reload">Refresh</el-button>
       </div>
       <el-table :data="rows" v-loading="loading">
-        <el-table-column prop="merchant_name" label="Customer" min-width="160" />
-        <el-table-column prop="merchant_no" label="Customer number" min-width="150" />
+        <el-table-column prop="merchant_name" label="Merchant" min-width="160" />
+        <el-table-column prop="merchant_no" label="Merchant number" min-width="150" />
         <el-table-column prop="va_count" label="VA count" min-width="100" />
         <el-table-column label="Currencies" min-width="180">
           <template #default="{ row }">{{ (row.currencies || []).join(', ') }}</template>

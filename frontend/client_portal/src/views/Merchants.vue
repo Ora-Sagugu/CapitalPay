@@ -1,26 +1,25 @@
 <template>
   <div>
-    <PageHeader title="Profiles" subtitle="Customer directory, risk limits and KYC review" />
+    <PageHeader title="Profiles" subtitle="Merchant directory, risk limits and KYC review" />
     <el-tabs v-model="pageTab" class="profiles-tabs" @tab-change="onPageTabChange">
       <el-tab-pane label="List" name="list">
         <KpiCards :items="kpis" />
         <div class="page-card">
           <div class="toolbar">
-            <el-input v-model="filters.search" placeholder="Customer / number / legal person" clearable style="width: 240px" @keyup.enter="reload" />
+            <el-input v-model="filters.search" placeholder="Merchant / number / legal person" clearable style="width: 240px" @keyup.enter="reload" />
             <el-select v-model="filters.risk_level" placeholder="Risk rating" clearable style="width: 140px" @change="reload">
               <el-option label="Low" value="LOW" /><el-option label="Medium" value="MEDIUM" /><el-option label="High" value="HIGH" />
             </el-select>
-            <el-select v-model="filters.status" placeholder="Customer status" clearable style="width: 140px" @change="reload">
+            <el-select v-model="filters.status" placeholder="Merchant status" clearable style="width: 140px" @change="reload">
               <el-option label="Pending review" value="PENDING" /><el-option label="Active" value="ACTIVE" /><el-option label="Suspended" value="SUSPENDED" /><el-option label="Closed" value="CLOSED" />
             </el-select>
             <el-button @click="reload">Refresh</el-button>
           </div>
           <el-table :data="rows" v-loading="loading">
-            <el-table-column prop="merchant_name" label="Customer name" min-width="140" />
-            <el-table-column prop="merchant_no" label="Customer number" min-width="150" />
-            <el-table-column label="Customer status" min-width="130"><template #default="{ row }"><StatusPill kind="merchant" :value="row.status" /></template></el-table-column>
+            <el-table-column prop="merchant_name" label="Merchant name" min-width="140" />
+            <el-table-column prop="merchant_no" label="Merchant number" min-width="150" />
+            <el-table-column label="Merchant status" min-width="130"><template #default="{ row }"><StatusPill kind="merchant" :value="row.status" /></template></el-table-column>
             <el-table-column label="Risk rating" min-width="110"><template #default="{ row }"><StatusPill kind="risk" :value="row.risk_level" /></template></el-table-column>
-            <el-table-column v-if="ENABLE_AGENTS" prop="agent_name" label="Agent" min-width="120" />
             <el-table-column prop="max_single_amount" label="Single limit" min-width="100" :formatter="formatMoneyCell" />
             <el-table-column prop="daily_count" label="Daily count" min-width="110" />
             <el-table-column prop="daily_limit" label="Daily limit" min-width="100" :formatter="formatMoneyCell" />
@@ -29,10 +28,12 @@
             </el-table-column>
             <el-table-column prop="next_review_date" label="Next review" min-width="110" />
             <el-table-column prop="license_expiry_date" label="Licence expiry" min-width="110" />
-            <el-table-column label="Actions" width="180" fixed="right">
+            <el-table-column label="Actions" width="260" fixed="right">
               <template #default="{ row }">
                 <el-button link type="primary" @click="openDetail(row)">Details</el-button>
-                <el-button link type="primary" @click="openEdit(row)">Edit</el-button>
+                <el-button v-if="canWrite" link type="primary" @click="openEdit(row)">Edit</el-button>
+                <el-button v-if="canApprove && row.status !== 'ACTIVE'" link type="success" @click="activate(row)">Activate</el-button>
+                <el-button v-if="canSuspend && row.status === 'ACTIVE'" link type="warning" @click="suspend(row)">Suspend</el-button>
                 <el-button link @click="showApiKey(row)">API Key</el-button>
               </template>
             </el-table-column>
@@ -41,11 +42,11 @@
         </div>
       </el-tab-pane>
       <el-tab-pane label="KYC" name="kyc" lazy>
-        <KycReview embedded />
+        <KycReview embedded portal-role="merchant" />
       </el-tab-pane>
     </el-tabs>
 
-    <el-dialog v-model="editVisible" title="Customer Risk and Limits" width="520px">
+    <el-dialog v-model="editVisible" title="Merchant Risk and Limits" width="520px">
       <el-form :model="editForm" label-width="120px">
         <el-form-item label="Risk Rating">
           <el-select v-model="editForm.risk_level" style="width: 100%" @change="onRiskLevelChange">
@@ -83,10 +84,10 @@
               </el-select>
             </el-form-item>
             <el-form-item label="Enabled"><el-switch v-model="productForm.is_enabled" /></el-form-item>
-            <el-form-item label="Single limit"><el-input v-model="productForm.max_single_amount" /></el-form-item>
           </el-form>
           <el-table :data="products">
-            <el-table-column prop="product_type" label="Product" /><el-table-column prop="is_enabled" label="Enabled" /><el-table-column prop="max_single_amount" label="Limit" :formatter="formatMoneyCell" />
+            <el-table-column prop="product_type" label="Product" />
+            <el-table-column prop="is_enabled" label="Enabled" />
           </el-table>
         </el-tab-pane>
         <el-tab-pane label="Charges" name="fees">
@@ -113,7 +114,7 @@
           <el-form :model="splitForm" label-width="140px">
             <el-form-item label="Auto allocation"><el-switch v-model="splitForm.auto_split" /></el-form-item>
             <el-form-item label="Cycle (T+N)"><el-input v-model="splitForm.settlement_cycle" /></el-form-item>
-            <el-form-item label="Customer ratio"><el-input v-model="splitForm.merchant_ratio" /></el-form-item>
+            <el-form-item label="Merchant ratio"><el-input v-model="splitForm.merchant_ratio" /></el-form-item>
             <el-form-item label="Platform ratio"><el-input v-model="splitForm.platform_ratio" /></el-form-item>
             <el-form-item v-if="ENABLE_AGENTS" label="Agent ratio"><el-input v-model="splitForm.agent_ratio" /></el-form-item>
             <el-button type="primary" @click="saveSplit">Save allocation</el-button>
@@ -145,10 +146,17 @@ import PageHeader from '@/components/PageHeader.vue'
 import KpiCards from '@/components/KpiCards.vue'
 import StatusPill from '@/components/StatusPill.vue'
 import KycReview from '@/views/KycReview.vue'
-import { getMerchants, getMerchant, getMerchantStats, updateMerchant, getMerchantKyc, setMerchantKyc, getSettlementAccounts, setSettlementAccount, getPaymentProducts, setPaymentProduct, getSplitConfig, saveSplitConfig, getPendingFunds, getSettledFunds, getPendingOrders, getSettledOrders, exportSettledFunds, exportSettledOrders } from '@/api/merchants'
+import { getMerchants, getMerchant, getMerchantStats, updateMerchant, activateMerchant, suspendMerchant, getMerchantKyc, setMerchantKyc, getSettlementAccounts, setSettlementAccount, getPaymentProducts, setPaymentProduct, getSplitConfig, saveSplitConfig, getPendingFunds, getSettledFunds, getPendingOrders, getSettledOrders, exportSettledFunds, exportSettledOrders } from '@/api/merchants'
 import { getRiskRatingLimits } from '@/api/param'
 import { unwrapList, money, formatMoneyCell } from '@/utils/format'
 import { ENABLE_AGENTS } from '@/config/features'
+import { useAuthStore } from '@/store/auth'
+
+const auth = useAuthStore()
+const canWrite = computed(() => auth.hasPermission('feature:merchants.write'))
+const canApprove = computed(() => auth.hasPermission('feature:merchants.approve'))
+const canSuspend = computed(() => auth.hasPermission('feature:merchants.suspend'))
+const canExport = computed(() => auth.hasPermission('feature:reports.export'))
 
 const route = useRoute()
 const router = useRouter()
@@ -181,7 +189,7 @@ const detailVisible = ref(false)
 const detailNo = ref('')
 const detailTab = ref('kyc')
 const kycForm = reactive({ legal_person: '', id_number: '', business_license: '', business_scope: '' })
-const productForm = reactive({ product_type: 'WIRE_TRANSFER', is_enabled: true, max_single_amount: '' })
+const productForm = reactive({ product_type: 'WIRE_TRANSFER', is_enabled: true })
 const products = ref([])
 const acctForm = reactive({ bank_name: '', account_name: '', account_number: '', is_default: true })
 const accounts = ref([])
@@ -242,9 +250,23 @@ async function saveEdit() {
   editVisible.value = false
   load()
 }
+async function activate(row) {
+  await activateMerchant(row.merchant_no, { reason: 'Activated from profiles' })
+  ElMessage.success('The customer has been activated')
+  load()
+}
+async function suspend(row) {
+  const { value } = await ElMessageBox.prompt('Enter the suspension reason', 'Suspend customer', {
+    inputPattern: /.+/,
+    inputErrorMessage: 'A reason is required.',
+  })
+  await suspendMerchant(row.merchant_no, { reason: value })
+  ElMessage.success('The customer has been suspended')
+  load()
+}
 async function showApiKey(row) {
   const detail = await getMerchant(row.merchant_no)
-  await ElMessageBox.alert(`API key: ${detail.api_key || '(the key is not returned in clear text)'}\nIntegration documentation: http://127.0.0.1:1024/api/docs/`, 'Customer platform integration', { confirmButtonText: 'Close' })
+  await ElMessageBox.alert(`API key: ${detail.api_key || '(the key is not returned in clear text)'}\nIntegration documentation: http://127.0.0.1:1024/api/docs/`, 'Merchant platform integration', { confirmButtonText: 'Close' })
 }
 async function openDetail(row) {
   detailNo.value = row.merchant_no

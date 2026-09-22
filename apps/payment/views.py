@@ -2,6 +2,7 @@
 from decimal import Decimal, InvalidOperation  # noqa: E402
 from rest_framework import viewsets, status, serializers
 from rest_framework.decorators import action
+from rest_framework.exceptions import PermissionDenied
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from django_filters.rest_framework import DjangoFilterBackend
@@ -22,7 +23,10 @@ from .services.pre_order import PreOrderService
 from .services.payment import PaymentConfirmService
 from .services.refund import RefundService
 from .services.close_order import CloseOrderService
-from .services.remittance_application import RemittanceApplicationService
+from .services.remittance_application import (
+    RemittanceApplicationService,
+    filter_awaiting_confirm_transfer,
+)
 from .services.remittance_quote import RemittanceQuoteService
 
 
@@ -40,10 +44,12 @@ class PaymentOrderViewSet(RequiresFeature, viewsets.ReadOnlyModelViewSet):
         "confirm_transfer": "feature:orders.approve",
         "confirm_payment": "feature:orders.approve",
         "payout_banks": "feature:orders.approve",
+        "pending_transfers": "feature:fund_transfers",
         "close_order": "feature:orders.approve",
         "manual_confirm": "feature:orders.approve",
         "refund_initiate": "feature:orders.approve",
     }
+    _TRANSFER_EXECUTE_ACTIONS = {"confirm_transfer", "payout_banks"}
     queryset = PaymentOrder.objects.filter(is_deleted=False).select_related("merchant")
     serializer_class = PaymentOrderSerializer
     lookup_field = "order_no"
@@ -54,20 +60,49 @@ class PaymentOrderViewSet(RequiresFeature, viewsets.ReadOnlyModelViewSet):
                      "beneficiary_name", "merchant__merchant_name", "merchant__merchant_no"]
     ordering_fields = ["created_at", "amount", "status"]
 
+    def check_feature(self, request):
+        if getattr(self, "action", None) in self._TRANSFER_EXECUTE_ACTIONS:
+            self._require_any_feature(
+                request, ("feature:orders.approve", "feature:fund_transfers"),
+            )
+            return
+        super().check_feature(request)
+
+    def _require_any_feature(self, request, codes):
+        from apps.rbac.models import SystemUser
+        from apps.rbac.services import PermissionService
+
+        user = getattr(request, "user", None)
+        if not user or not getattr(user, "is_authenticated", False):
+            raise PermissionDenied("Authentication credentials were not provided")
+        if not isinstance(user, SystemUser):
+            raise PermissionDenied("Access is restricted to operations principals")
+        user_id = str(getattr(user, "id", None) or getattr(user, "pk", None) or "")
+        service = PermissionService()
+        if any(service.auth_service.has_permission(user_id, code) for code in codes):
+            return
+        raise PermissionDenied(
+            f"The authenticated principal is not authorised for permission {codes[0]}",
+        )
+
     def get_queryset(self):
         qs = super().get_queryset()
-        if getattr(self, "action", None) == "retrieve":
-            return qs.select_related("merchant", "quote").prefetch_related("refunds")
-        if getattr(self, "action", None) == "sanction_review":
+        action = getattr(self, "action", None)
+        if action == "retrieve":
+            return qs.select_related("merchant", "quote").prefetch_related("refunds", "fee_shares")
+        if action == "sanction_review":
             return qs.select_related("merchant")
-        if getattr(self, "action", None) == "list":
+        if action == "list":
             status_filter = (self.request.query_params.get("status") or "").strip()
             if status_filter != PaymentOrder.OrderStatus.PENDING_AGENT_REVIEW:
                 qs = qs.exclude(status=PaymentOrder.OrderStatus.PENDING_AGENT_REVIEW)
+        if action == "pending_transfers":
+            qs = qs.exclude(status=PaymentOrder.OrderStatus.PENDING_AGENT_REVIEW)
+            qs = filter_awaiting_confirm_transfer(qs)
         return qs
 
     def get_serializer_class(self):
-        if self.action == "list":
+        if self.action in ("list", "pending_transfers"):
             return PaymentOrderListSerializer
         if self.action == "retrieve":
             return PaymentOrderDetailSerializer
@@ -161,7 +196,7 @@ class PaymentOrderViewSet(RequiresFeature, viewsets.ReadOnlyModelViewSet):
             PENDING_REVIEW → reject → CLOSED（需填写驳回原因）
         """
         order = PaymentOrder.objects.select_for_update().select_related(
-            "merchant", "merchant__agent"
+            "merchant", "agent", "agent_customer",
         ).get(pk=self.get_object().pk)
         action_type = request.data.get("action")
         if action_type not in ("approve", "reject"):
@@ -202,10 +237,15 @@ class PaymentOrderViewSet(RequiresFeature, viewsets.ReadOnlyModelViewSet):
             })
 
         # ── approve: PENDING_REVIEW → PENDING_PAY（待付款，此时可申请退款） ──
-        from apps.payment.services.remittance_policy import RemittanceEligibilityPolicy
-        RemittanceEligibilityPolicy().assert_eligible(
-            order.merchant, order.amount, include_usage=False
-        )
+        from apps.payment.services.remittance_policy import AgentRemittanceEligibilityPolicy, RemittanceEligibilityPolicy
+        if order.agent_id:
+            AgentRemittanceEligibilityPolicy().assert_eligible(
+                order.agent, order.agent_customer, order.amount, include_usage=False,
+            )
+        else:
+            RemittanceEligibilityPolicy().assert_eligible(
+                order.merchant, order.amount, include_usage=False
+            )
         order.status = "PENDING_PAY"
         from apps.payment.services.prn_service import bind_prn_to_order
         requested = (request.data.get("prn_code") or order.prn_code or "").strip()
@@ -399,21 +439,36 @@ class PaymentOrderViewSet(RequiresFeature, viewsets.ReadOnlyModelViewSet):
         from apps.compliance.services import build_sanction_warning
         return build_sanction_warning(name_hits, address_hits, country_hits)
 
+    @action(detail=False, methods=["get"], url_path="pending-transfers")
+    def pending_transfers(self, request):
+        """Remittance orders that currently require Confirm transfer."""
+        return self.list(request)
+
     @action(detail=True, methods=["get"], url_path="payout-banks")
     def payout_banks(self, request, order_no=None):
-        """Rank payout banks by Fee Rule then Balances for this instruction."""
+        """Rank payout banks by Bank Fee then Balances for this instruction."""
         from apps.routing.services import RoutingService
 
         order = self.get_object()
         amount = RoutingService.payout_amount_for_order(order)
         currency = RoutingService.payout_currency_for_order(order)
-        ranked = RoutingService.rank_payout_banks(amount, currency)
-        recommended = next((row for row in ranked if row["recommended"]), None)
+        remittance_fee = order.fee_amount
+        ranked = RoutingService.rank_payout_banks(
+            amount, currency, remittance_fee=remittance_fee,
+        )
+        plan = RoutingService.payout_plan_from_ranked(
+            ranked, amount, currency, remittance_fee=remittance_fee,
+        )
+        splits = (plan or {}).get("splits") or []
+        recommended_codes = [leg["bank_code"] for leg in splits]
         return Response({
             "order_no": order.order_no,
             "amount": str(amount),
             "currency": currency,
-            "recommended_bank_code": recommended["bank_code"] if recommended else None,
+            "remittance_fee": str(remittance_fee or 0),
+            "recommended_bank_code": recommended_codes[0] if recommended_codes else None,
+            "recommended_bank_codes": recommended_codes,
+            "recommended_split": splits,
             "results": ranked,
         })
 
@@ -426,7 +481,8 @@ class PaymentOrderViewSet(RequiresFeature, viewsets.ReadOnlyModelViewSet):
         PAY_RECEIVED / PENDING_PAY → PENDING_SETTLE
 
         运营人员确认银行转账已发起后，订单进入待清算队列，
-        等待每日结算批次处理。汇出银行按 Fee Rule 升序、余额是否足够瀑布选择。
+        等待每日结算批次处理。汇出银行按 Fee Rule 升序选择；若最便宜银行余额不足，
+        可用其剩余余额并再选一家银行补足。
         """
         order = self.get_object()
         if order.status not in ("PAY_RECEIVED", "PENDING_PAY"):
@@ -444,9 +500,13 @@ class PaymentOrderViewSet(RequiresFeature, viewsets.ReadOnlyModelViewSet):
 
         now = timezone.now()
         selected = RoutingService.bind_payout_bank(
-            order, bank_code=(request.data.get("bank_code") or "").strip(),
+            order,
+            bank_code=(request.data.get("bank_code") or "").strip(),
+            bank_codes=request.data.get("bank_codes"),
         )
-        order.save(update_fields=["bank_code", "updated_at"])
+        order.save(update_fields=["bank_code", "payout_splits", "updated_at"])
+        from apps.settlement.engine.calculator import SettlementCalculator
+        SettlementCalculator().calculate_fee_share(order)
 
         if order.status == "PENDING_PAY":
             order = PaymentConfirmService().manual_confirm_by_order_no(
@@ -469,9 +529,10 @@ class PaymentOrderViewSet(RequiresFeature, viewsets.ReadOnlyModelViewSet):
                 "operator": request.data.get("reviewed_by", ""),
                 "bank_txn_id": order.bank_txn_id,
                 "bank_code": order.bank_code,
+                "payout_splits": order.payout_splits,
             })
             order.save(update_fields=[
-                "status", "bank_txn_id", "bank_code", "pay_received_at",
+                "status", "bank_txn_id", "bank_code", "payout_splits", "pay_received_at",
                 "updated_at", "status_history",
             ])
             from apps.payment.services.notify import trigger_order_notify
@@ -481,6 +542,7 @@ class PaymentOrderViewSet(RequiresFeature, viewsets.ReadOnlyModelViewSet):
             "message": "Transfer confirmed, order pending settlement",
             "status": order.status,
             "bank_code": order.bank_code,
+            "payout_splits": order.payout_splits,
             "computed_fee": selected.get("computed_fee"),
             "confirmed_at": now.isoformat(),
         })

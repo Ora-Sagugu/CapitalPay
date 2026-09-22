@@ -68,7 +68,7 @@ class BankFileFetcher:
                     )
                     writer.writerow([
                         f"MOCK_TXN_{order.order_no}",
-                        f"{order.amount:.2f}",
+                        f"{order.expected_collection_amount():.2f}",
                         txn_time.strftime("%Y-%m-%d %H:%M:%S"),
                         "CREDIT",
                         order.unique_identification_no or order.prn_code or "",

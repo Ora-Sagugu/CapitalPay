@@ -28,7 +28,7 @@ vi.mock('@/api/report', () => ({
 }))
 vi.mock('@/store/auth', () => ({
   useAuthStore: () => ({
-    hasPermission: (code) => code === 'feature:reports'
+    hasPermission: (code) => code === 'feature:reports.export'
   })
 }))
 

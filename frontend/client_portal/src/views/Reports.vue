@@ -229,7 +229,7 @@ import {
 import { unwrapList, isMoneyField, formatMoneyCell, money } from '@/utils/format'
 
 const auth = useAuthStore()
-const canExport = computed(() => auth.hasPermission('feature:reports'))
+const canExport = computed(() => auth.hasPermission('feature:reports.export'))
 
 const tab = ref('overview')
 const loading = ref(false)

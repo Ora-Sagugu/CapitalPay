@@ -42,9 +42,16 @@ class BankChannelViewSet(RequiresFeature, viewsets.ViewSet):
             return Response({"detail": "Not found"}, status=status.HTTP_404_NOT_FOUND)
 
     def update(self, request, pk=None):
-        ser = BankChannelCreateUpdateSerializer(data=request.data)
+        ser = BankChannelCreateUpdateSerializer(
+            data=request.data,
+            context={"channel_id": pk},
+        )
         ser.is_valid(raise_exception=True)
-        channel = RoutingService.update_channel(pk, ser.validated_data)
+        # Edit payloads omit balance/currency and other channel fields; serializer
+        # defaults must not overwrite existing values (e.g. balance → 0).
+        allowed = set(request.data.keys()) | {"min_fee"}
+        update_data = {k: v for k, v in ser.validated_data.items() if k in allowed}
+        channel = RoutingService.update_channel(pk, update_data)
         if channel:
             return Response(BankChannelSerializer(channel).data)
         return Response({"detail": "Not found"}, status=status.HTTP_404_NOT_FOUND)
@@ -90,9 +97,9 @@ class BankChannelViewSet(RequiresFeature, viewsets.ViewSet):
         offline = qs.filter(status=BankChannel.Status.OFFLINE).count()
 
         balances = qs.aggregate(
-            total_usd=Sum("usd_balance"),
-            total_hkd=Sum("hkd_balance"),
-            total_cny=Sum("cny_balance"),
+            total_usd=Sum("balance", filter=Q(currency__iexact="USD")),
+            total_hkd=Sum("balance", filter=Q(currency__iexact="HKD")),
+            total_cny=Sum("balance", filter=Q(currency__iexact="CNY")),
         )
 
         from django.utils import timezone

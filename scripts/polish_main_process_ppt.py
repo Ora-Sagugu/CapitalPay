@@ -154,7 +154,7 @@ def polish() -> Path:
     caption_updates = {
         "Agent Registration Tab": "Agent portal Register tab — create an agent account with Gmail, then complete KYC.",
         "Agent Registration & Login": "Agent portal Sign in — demo GraceNyambura@gmail.com / 123456.",
-        "Customer Registration & Login": "Customer portal Sign in / Register — separate URL from the Agent portal.",
+        "Merchant Registration & Login": "Merchant portal Sign in / Register — separate URL from the Agent portal.",
         "Settlement Debit — Book Deduction": "After payout completes, Account activity shows Debit / Settlement payout rows and running balance.",
         "Ops Fund Trace (Optional)": "Ops Fund Trace follows an order from collection VA through settlement stages.",
         "Account Transaction Ledger": "Customer Account activity: CREDIT = collection confirmed; DEBIT = settlement payout.",

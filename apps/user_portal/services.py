@@ -45,12 +45,12 @@ class UserService:
 
     @staticmethod
     def ensure_portal_role(user: EndUser) -> EndUser:
-        """Legacy accounts that already started customer onboarding stay customers."""
+        """Legacy accounts that already started merchant onboarding stay merchants."""
         role = user.portal_role or "none"
         if role != "none":
             return user
         if user.default_merchant_id or (user.onboarding_status and user.onboarding_status != "none"):
-            user.portal_role = "customer"
+            user.portal_role = "merchant"
             user.save(update_fields=["portal_role"])
         return user
 
@@ -85,8 +85,8 @@ class UserService:
                 "The account identity has already been selected",
                 409,
             )
-        if role not in ("customer", "agent"):
-            raise BusinessException("INVALID_ROLE", "Identity must be customer or agent")
+        if role not in ("merchant", "agent"):
+            raise BusinessException("INVALID_ROLE", "Identity must be merchant or agent")
         user.portal_role = role
         user.save(update_fields=["portal_role"])
         return {"portal_role": role, "user": self._session_user(user)}
@@ -96,8 +96,8 @@ class UserService:
     def _assign_portal_role(self, user: EndUser, portal_role: str = "") -> EndUser:
         if not portal_role:
             return user
-        if portal_role not in ("customer", "agent"):
-            raise BusinessException("INVALID_ROLE", "Identity must be customer or agent")
+        if portal_role not in ("merchant", "agent"):
+            raise BusinessException("INVALID_ROLE", "Identity must be merchant or agent")
         user.portal_role = portal_role
         user.save(update_fields=["portal_role"])
         return user
@@ -106,8 +106,8 @@ class UserService:
         """Lock identity on first login, or reject the wrong portal."""
         if not portal_role:
             return user
-        if portal_role not in ("customer", "agent"):
-            raise BusinessException("INVALID_ROLE", "Identity must be customer or agent")
+        if portal_role not in ("merchant", "agent"):
+            raise BusinessException("INVALID_ROLE", "Identity must be merchant or agent")
         current = user.portal_role or "none"
         if current in ("", "none"):
             return self._assign_portal_role(user, portal_role)
@@ -115,14 +115,14 @@ class UserService:
             if current == "agent":
                 message = "This account is an Agent. Sign in at the Agent portal (/agent/login)."
             else:
-                message = "This account is a Customer. Sign in at the Customer portal (/login)."
+                message = "This account is a Merchant. Sign in at the Merchant portal (/login)."
             raise BusinessException("WRONG_PORTAL", message, 403)
         return user
 
     @transaction.atomic
     def register(self, *, phone: str, password: str, sms_code: str = "",
                  nickname: str = "", portal_role: str = "") -> dict:
-        """手机号注册 — 需要短信验证码。可同时选定 Agent 或 Customer 身份。"""
+        """手机号注册 — 需要短信验证码。可同时选定 Agent 或 Merchant 身份。"""
 
         if EndUser.objects.filter(phone=phone).exists():
             raise BusinessException("PHONE_EXISTS", "This mobile number has already been registered")
@@ -261,7 +261,7 @@ class UserService:
                 password_hash=self._hash_password(secrets.token_hex(16)),
                 nickname=f"用户{phone[-4:]}",
             )
-            self._assign_portal_role(user, portal_role or "customer")
+            self._assign_portal_role(user, portal_role or "merchant")
         else:
             self._bind_or_assert_portal(user, portal_role)
             user.refresh_from_db()
@@ -352,6 +352,8 @@ class UserService:
             "license_image": images.get("license_image", ""),
             "id_front_image": images.get("id_front_image", ""),
             "id_back_image": images.get("id_back_image", ""),
+            "application_ref": data.get("application_ref") or "",
+            "kyb_payload": data.get("kyb") if isinstance(data.get("kyb"), dict) else {},
             "agent_review_status": agent_review_status,
             "agent_reviewed_at": None,
             "agent_reviewer": "",
@@ -405,6 +407,8 @@ class UserService:
                 "id_front_image": onboarding.id_front_image,
                 "id_back_image": onboarding.id_back_image,
             },
+            "application_ref": onboarding.application_ref,
+            "kyb": onboarding.kyb_payload or {},
         }
 
     @staticmethod
@@ -459,7 +463,15 @@ class UserService:
         }
 
     @transaction.atomic
-    def review_onboarding(self, user: EndUser, action: str, remark: str = "", reviewer: str = "") -> dict:
+    def review_onboarding(
+        self,
+        user: EndUser,
+        action: str,
+        remark: str = "",
+        reviewer: str = "",
+        kyc_tier: str = "",
+        commission_rate=None,
+    ) -> dict:
         """一次审核：通过后创建客户或代理，并完成 KYC 激活。"""
         from decimal import Decimal
 
@@ -477,12 +489,16 @@ class UserService:
                 409,
             )
         self._require_ops_reviewable(user)
-        portal_role = user.portal_role or "customer"
+        portal_role = user.portal_role or "merchant"
         if action == "approve":
             user.onboarding_status = "approved"
             user.is_verified = True
             if portal_role == "agent":
-                agent = self._create_agent_from_onboarding(user) or user.default_agent
+                agent = self._create_agent_from_onboarding(
+                    user,
+                    kyc_tier=kyc_tier,
+                    commission_rate=commission_rate,
+                ) or user.default_agent
                 if agent:
                     user.default_agent = agent
             else:
@@ -553,7 +569,7 @@ class UserService:
         approved_label = (
             "The application has been approved and the agent has been activated"
             if portal_role == "agent"
-            else "The application has been approved and the customer has been activated"
+            else "The application has been approved and the merchant has been activated"
         )
         return {
             "message": (
@@ -739,8 +755,10 @@ class UserService:
         ensure_agent_accounts(agent)
 
     @staticmethod
-    def _create_agent_from_onboarding(user: EndUser):
+    def _create_agent_from_onboarding(user: EndUser, kyc_tier: str = "", commission_rate=None):
         """审核通过后，根据 onboarding 资料创建 Agent 与 AgentKYC。"""
+        from decimal import Decimal
+
         from apps.agent.models import Agent, AgentKYC
         from apps.agent.services import generate_agent_no
 
@@ -765,6 +783,10 @@ class UserService:
         id_number = (onboarding.id_number if onboarding else "") or ""
         address = (onboarding.address if onboarding else "") or ""
         license_path = (onboarding.license_image if onboarding else "") or ""
+        kyb = (onboarding.kyb_payload if onboarding else {}) or {}
+        payout = kyb.get("payout") or {}
+        rate = commission_rate if commission_rate is not None else Decimal("0")
+        tier = kyc_tier or AgentKYC.KycTier.TIER_1
 
         agent = Agent.objects.create(
             agent_no=generate_agent_no(),
@@ -780,10 +802,11 @@ class UserService:
             business_license_no=id_number[:64],
             business_license_file=license_path[:512],
             registered_address=address[:256],
-            settlement_bank_name="",
-            settlement_account_no="",
-            swift_code="",
-            settlement_account_holder=agent_name[:128],
+            commission_rate=rate,
+            settlement_bank_name=(payout.get("bank") or (onboarding.bank_name if onboarding else "") or "")[:128],
+            settlement_account_no=(payout.get("account_number") or (onboarding.bank_account if onboarding else "") or "")[:64],
+            swift_code=(payout.get("swift") or (onboarding.swift_code if onboarding else "") or "")[:16],
+            settlement_account_holder=(payout.get("account_name") or agent_name)[:128],
         )
         AgentKYC.objects.create(
             agent=agent,
@@ -795,6 +818,8 @@ class UserService:
             registered_address=address[:256],
             kyc_status=AgentKYC.KycStatus.SUBMITTED,
             submitted_at=timezone.now(),
+            tier=tier,
+            kyb_snapshot=kyb,
         )
         return agent
 
@@ -821,6 +846,9 @@ class UserService:
 
         merchant = user.default_merchant
         agent = user.default_agent
+        # Merchants belong to an agent via Merchant.agent (EndUser.default_agent is agent-portal only).
+        if not agent and merchant is not None:
+            agent = merchant.agent
         portal_role = user.portal_role or "none"
         try:
             kyc_status = merchant.kyc.kyc_status if merchant else ""
@@ -905,6 +933,7 @@ class UserService:
             "merchant_kyc_status": kyc_status,
             "default_agent_id": str(agent.id) if agent else "",
             "agent_no": agent.agent_no if agent else "",
+            "agent_name": agent.agent_name if agent else "",
             "agent_status": agent.status if agent else "",
             "agent_kyc_status": agent_kyc_status,
             "activation_stage": activation_stage,
@@ -985,10 +1014,10 @@ class UserService:
         from collections import defaultdict
         from decimal import Decimal
 
-        from django.db.models import Q, Sum
+        from django.db.models import Count, Q, Sum
 
         from apps.account.models import VirtualAccount
-        from apps.agent.models import AgentMerchant
+        from apps.agent.models import AgentCustomer, AgentMerchant
         from apps.merchant.models import Merchant
         from apps.payment.services.remittance_policy import RemittanceEligibilityPolicy
 
@@ -1000,14 +1029,22 @@ class UserService:
         related_ids = [rel.merchant_id for rel in relations.values()]
         merchants = Merchant.objects.filter(is_deleted=False).filter(
             Q(agent=agent) | Q(pk__in=related_ids)
-        ).order_by("-created_at")
+        ).select_related("kyc").order_by("-created_at")
         merchant_ids = [m.pk for m in merchants]
         end_users = {
-            str(eu.default_merchant_id): str(eu.id)
+            str(eu.default_merchant_id): eu
             for eu in EndUser.objects.filter(
                 default_merchant_id__in=merchant_ids,
-                portal_role="customer",
+                portal_role="merchant",
                 is_deleted=False,
+            )
+        }
+        customer_counts = {
+            row["merchant_id"]: row["total"]
+            for row in (
+                AgentCustomer.objects.filter(merchant_id__in=merchant_ids, is_deleted=False)
+                .values("merchant_id")
+                .annotate(total=Count("id"))
             )
         }
         balance_rows = (
@@ -1034,6 +1071,15 @@ class UserService:
             rel = relations.get(str(merchant.id))
             rate = rel.commission_rate if rel else agent.commission_rate
             eligibility = policy.evaluate(merchant, include_usage=False)
+            end_user = end_users.get(str(merchant.id))
+            portal_email = self._portal_contact_email(end_user) if end_user else ""
+            merchant_email = (merchant.contact_email or "").strip()
+            if not merchant_email or merchant_email.endswith("@placeholder.local"):
+                merchant_email = portal_email
+            try:
+                kyc_status = merchant.kyc.kyc_status
+            except Exception:
+                kyc_status = ""
             rows.append({
                 "id": str(merchant.id),
                 "merchant_no": merchant.merchant_no,
@@ -1042,11 +1088,215 @@ class UserService:
                 "commission_rate": str(rate),
                 "effective_from": rel.effective_from.isoformat() if rel and rel.effective_from else "",
                 "effective_to": rel.effective_to.isoformat() if rel and rel.effective_to else "",
-                "end_user_id": end_users.get(str(merchant.id), ""),
+                "end_user_id": str(end_user.id) if end_user else "",
                 "balances": balances_by_merchant.get(merchant.pk, []),
+                "contact_name": merchant.contact_name or merchant.legal_person_name or "",
+                "contact_phone": merchant.contact_phone or "",
+                "contact_email": merchant_email,
+                "customer_count": int(customer_counts.get(merchant.pk, 0)),
+                "kyc_status": kyc_status,
                 "remittance_eligibility": eligibility.as_dict(),
             })
         return rows
+
+    def list_bound_agent_merchant_customers(self, user: EndUser) -> list[dict]:
+        """Read-only: customers belonging to merchants under this agent."""
+        from apps.agent.models import AgentCustomer
+        from apps.merchant.models import Merchant
+
+        agent = self.require_bound_agent(user)
+        merchant_ids = self._bound_agent_merchant_ids(agent)
+        if not merchant_ids:
+            return []
+        merchants = {
+            row.id: row
+            for row in Merchant.objects.filter(pk__in=merchant_ids, is_deleted=False)
+        }
+        rows = []
+        for customer in (
+            AgentCustomer.objects.filter(merchant_id__in=merchant_ids, is_deleted=False)
+            .select_related("merchant")
+            .order_by("-created_at")
+        ):
+            merchant = merchants.get(customer.merchant_id) or customer.merchant
+            if not merchant:
+                continue
+            rows.append(self._serialize_merchant_customer(merchant, customer))
+        return rows
+
+    def require_bound_merchant(self, user: EndUser):
+        """Return the EndUser's bound Merchant or raise 403."""
+        from apps.merchant.models import Merchant
+
+        self.ensure_portal_role(user)
+        user.refresh_from_db()
+        if (user.portal_role or "none") != "merchant":
+            raise BusinessException(
+                "NOT_MERCHANT",
+                "This workspace is available only to merchant accounts",
+                403,
+            )
+        if user.onboarding_status != "approved" or not user.default_merchant_id:
+            raise BusinessException(
+                "MERCHANT_NOT_READY",
+                "Merchant onboarding must be approved before this information is available",
+                403,
+            )
+        merchant = Merchant.objects.filter(pk=user.default_merchant_id, is_deleted=False).first()
+        if not merchant:
+            raise BusinessException(
+                "MERCHANT_NOT_READY",
+                "Merchant onboarding must be approved before this information is available",
+                403,
+            )
+        return merchant
+
+    def _serialize_merchant_customer(self, merchant, customer) -> dict:
+        from apps.payment.services.remittance_policy import RemittanceEligibilityPolicy
+
+        eligibility = RemittanceEligibilityPolicy().evaluate(
+            merchant, customer=customer, require_customer=True, include_usage=False,
+        )
+        return {
+            "id": str(customer.id),
+            "customer_no": customer.customer_no,
+            "customer_name": customer.legal_name,
+            "legal_name": customer.legal_name,
+            "merchant_no": merchant.merchant_no if merchant else "",
+            "merchant_name": merchant.merchant_name if merchant else "",
+            "status": customer.kyc_status,
+            "kyc_status": customer.kyc_status,
+            "kyc_remark": customer.kyc_remark,
+            "contact_name": customer.contact_name,
+            "contact_phone": customer.contact_phone,
+            "contact_email": customer.contact_email,
+            "id_type": customer.id_type,
+            "id_number": customer.id_number,
+            "nationality": customer.nationality,
+            "address": customer.address,
+            "license_expiry_date": (
+                customer.license_expiry_date.isoformat() if customer.license_expiry_date else ""
+            ),
+            "bank_name": customer.bank_name,
+            "branch_name": customer.branch_name,
+            "account_name": customer.account_name,
+            "bank_account": customer.bank_account,
+            "swift_code": customer.swift_code,
+            "reviewed_at": customer.reviewed_at,
+            "reviewer": customer.reviewer,
+            "created_at": customer.created_at,
+            "balances": [],
+            "remittance_eligibility": eligibility.as_dict(),
+        }
+
+    def list_bound_merchant_customers(self, user: EndUser) -> list[dict]:
+        from apps.agent.models import AgentCustomer
+
+        merchant = self.require_bound_merchant(user)
+        customers = AgentCustomer.objects.filter(
+            merchant=merchant, is_deleted=False,
+        ).order_by("-created_at")
+        return [self._serialize_merchant_customer(merchant, row) for row in customers]
+
+    def resolve_bound_merchant_customer(self, user: EndUser, customer_id: str):
+        from apps.agent.models import AgentCustomer
+
+        merchant = self.require_bound_merchant(user)
+        customer_id = str(customer_id or "").strip()
+        if not customer_id:
+            raise BusinessException(
+                "CUSTOMER_REQUIRED",
+                "Please select a customer before requesting a quotation",
+                400,
+            )
+        customer = AgentCustomer.objects.filter(
+            pk=customer_id, merchant=merchant, is_deleted=False,
+        ).first()
+        if not customer:
+            raise BusinessException("CUSTOMER_NOT_FOUND", "The customer does not exist", 404)
+        return merchant, customer
+
+    def create_merchant_customer(self, user: EndUser, data: dict) -> dict:
+        from apps.agent.models import AgentCustomer
+
+        merchant = self.require_bound_merchant(user)
+        legal_name = (data.get("legal_name") or "").strip()
+        if not legal_name:
+            raise BusinessException("PARAM_INVALID", "Legal name is required", 400)
+        customer = AgentCustomer.objects.create(
+            merchant=merchant,
+            agent=None,
+            legal_name=legal_name,
+            contact_name=(data.get("contact_name") or "").strip(),
+            contact_phone=(data.get("contact_phone") or "").strip(),
+            contact_email=(data.get("contact_email") or "").strip(),
+            id_type=(data.get("id_type") or "").strip(),
+            id_number=(data.get("id_number") or "").strip(),
+            nationality=(data.get("nationality") or "").strip(),
+            address=(data.get("address") or "").strip(),
+            license_expiry_date=data.get("license_expiry_date") or None,
+            kyb_payload=data.get("kyb_payload") or {},
+            kyc_status=AgentCustomer.KycStatus.APPROVED,
+            bank_name=(data.get("bank_name") or "").strip(),
+            branch_name=(data.get("branch_name") or "").strip(),
+            account_name=(data.get("account_name") or "").strip(),
+            bank_account=(data.get("bank_account") or "").strip(),
+            swift_code=(data.get("swift_code") or "").strip(),
+        )
+        return self._serialize_merchant_customer(merchant, customer)
+
+    def update_merchant_customer(self, user: EndUser, customer_id: str, data: dict) -> dict:
+        from apps.agent.models import AgentCustomer
+
+        merchant, customer = self.resolve_bound_merchant_customer(user, customer_id)
+        updatable = [
+            "legal_name", "contact_name", "contact_phone", "contact_email",
+            "id_type", "id_number", "nationality", "address", "license_expiry_date",
+            "bank_name", "branch_name", "account_name", "bank_account", "swift_code",
+        ]
+        fields = []
+        for key in updatable:
+            if key not in data:
+                continue
+            value = data.get(key)
+            if key != "license_expiry_date":
+                value = (value or "").strip() if isinstance(value, str) else value
+            setattr(customer, key, value)
+            fields.append(key)
+        if "kyb_payload" in data and isinstance(data.get("kyb_payload"), dict):
+            customer.kyb_payload = data["kyb_payload"]
+            fields.append("kyb_payload")
+        if fields:
+            fields.append("updated_at")
+            if customer.kyc_status in (
+                AgentCustomer.KycStatus.DRAFT,
+                AgentCustomer.KycStatus.SUBMITTED,
+            ):
+                customer.kyc_status = AgentCustomer.KycStatus.APPROVED
+                fields.append("kyc_status")
+            customer.save(update_fields=fields)
+        elif customer.kyc_status in (
+            AgentCustomer.KycStatus.DRAFT,
+            AgentCustomer.KycStatus.SUBMITTED,
+        ):
+            customer.kyc_status = AgentCustomer.KycStatus.APPROVED
+            customer.save(update_fields=["kyc_status", "updated_at"])
+        return self._serialize_merchant_customer(merchant, customer)
+
+    def submit_merchant_customer(self, user: EndUser, customer_id: str) -> dict:
+        from apps.agent.models import AgentCustomer
+
+        merchant, customer = self.resolve_bound_merchant_customer(user, customer_id)
+        if not (customer.legal_name or "").strip():
+            raise BusinessException("PARAM_INVALID", "Legal name is required", 400)
+        customer.kyc_status = AgentCustomer.KycStatus.APPROVED
+        customer.save(update_fields=["kyc_status", "updated_at"])
+        return self._serialize_merchant_customer(merchant, customer)
+
+    def delete_merchant_customer(self, user: EndUser, customer_id: str) -> None:
+        merchant, customer = self.resolve_bound_merchant_customer(user, customer_id)
+        customer.is_deleted = True
+        customer.save(update_fields=["is_deleted", "updated_at"])
 
     def resolve_bound_agent_merchant(self, user: EndUser, merchant_id: str):
         """Return a merchant bound to this agent or raise AGENT_MERCHANT_FORBIDDEN."""
@@ -1075,7 +1325,7 @@ class UserService:
     def resolve_customer_user_id_for_merchant(self, merchant) -> str:
         customer = EndUser.objects.filter(
             default_merchant=merchant,
-            portal_role="customer",
+            portal_role="merchant",
             is_deleted=False,
         ).first()
         return str(customer.id) if customer else ""
@@ -1103,6 +1353,35 @@ class UserService:
             user_id=str(user.id),
         )
         return RemittanceQuoteService.serialize(quote)
+
+    def create_merchant_remittance_quote(self, user: EndUser, data: dict) -> dict:
+        from apps.payment.services.remittance_quote import RemittanceQuoteService
+
+        merchant, customer = self.resolve_bound_merchant_customer(user, data.get("customer_id"))
+        quote = RemittanceQuoteService().create_quote(
+            merchant=merchant,
+            agent_customer=customer,
+            amount=data["amount"],
+            from_currency=data["from_currency"],
+            to_currency=data["to_currency"],
+            fee_bearing=data["fee_bearing"],
+            actor_type="CUSTOMER",
+            user_id=str(user.id),
+        )
+        return RemittanceQuoteService.serialize(quote)
+
+    def submit_merchant_remittance(self, user: EndUser, *, payload: dict, idempotency_key: str):
+        from apps.payment.services.remittance_application import RemittanceApplicationService
+
+        merchant, customer = self.resolve_bound_merchant_customer(user, payload.get("customer_id"))
+        return RemittanceApplicationService().submit(
+            merchant=merchant,
+            agent_customer=customer,
+            payload=payload,
+            idempotency_key=idempotency_key,
+            user_id=str(user.id),
+            actor_type="CUSTOMER",
+        )
 
     def submit_agent_remittance(
         self,
@@ -1359,7 +1638,7 @@ class UserService:
     def _agent_kyc_base_qs(self, agent):
         return EndUser.objects.filter(
             is_deleted=False,
-            portal_role="customer",
+            portal_role="merchant",
             onboarding__agent_code__iexact=agent.agent_no,
         ).exclude(
             onboarding__agent_review_status=UserOnboarding.AgentReviewStatus.NONE,
@@ -1389,7 +1668,7 @@ class UserService:
 
     def _get_agent_kyc_target(self, agent, user_id: str) -> tuple[EndUser, UserOnboarding]:
         target = EndUser.objects.filter(
-            pk=user_id, is_deleted=False, portal_role="customer",
+            pk=user_id, is_deleted=False, portal_role="merchant",
         ).select_related("onboarding").first()
         if not target:
             raise BusinessException("USER_NOT_FOUND", "The user does not exist", 404)
@@ -1509,6 +1788,72 @@ class UserService:
                 else "The profile review has been rejected"
             ),
             **self._agent_kyc_row(target),
+        }
+
+    def merchant_remittance_overview(self, user: EndUser, *, period: str = "month") -> dict:
+        """Merchant portal Overview KPIs for remittance volume and success."""
+        from decimal import Decimal
+
+        from django.db.models import Count, Sum
+
+        from apps.payment.models import PaymentOrder
+
+        key = (period or "month").strip().lower()
+        if key not in {"day", "month", "all"}:
+            raise BusinessException(
+                "INVALID_PERIOD",
+                "period must be day, month, or all",
+                400,
+            )
+
+        qs = PaymentOrder.objects.filter(user_id=str(user.id), is_deleted=False)
+        now = timezone.now()
+        if key == "day":
+            qs = qs.filter(created_at__gte=now - timedelta(days=1))
+        elif key == "month":
+            qs = qs.filter(created_at__gte=now - timedelta(days=30))
+
+        success_statuses = (
+            PaymentOrder.OrderStatus.SETTLED,
+            "COMPLETED",  # legacy alias still present on older rows
+        )
+        remittance_count = qs.count()
+        success_count = qs.filter(status__in=success_statuses).count()
+        if remittance_count:
+            success_rate = (
+                Decimal(success_count) * Decimal("100") / Decimal(remittance_count)
+            ).quantize(Decimal("0.01"))
+        else:
+            success_rate = Decimal("0.00")
+
+        by_currency = []
+        for row in (
+            qs.values("from_currency")
+            .annotate(
+                total_amount=Sum("amount"),
+                total_fee=Sum("fee_amount"),
+                order_count=Count("id"),
+            )
+            .order_by("from_currency")
+        ):
+            currency = (row["from_currency"] or "").upper() or "—"
+            by_currency.append({
+                "currency": currency,
+                "order_count": row["order_count"] or 0,
+                "total_amount": str(
+                    (row["total_amount"] or Decimal("0")).quantize(Decimal("0.01"))
+                ),
+                "total_fee": str(
+                    (row["total_fee"] or Decimal("0")).quantize(Decimal("0.01"))
+                ),
+            })
+
+        return {
+            "period": key,
+            "remittance_count": remittance_count,
+            "success_count": success_count,
+            "success_rate": str(success_rate),
+            "by_currency": by_currency,
         }
 
     @staticmethod

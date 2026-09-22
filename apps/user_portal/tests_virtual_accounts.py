@@ -7,6 +7,7 @@ from apps.account.models import VirtualAccount
 from apps.core.currencies import ISO_4217_CODES, is_supported_currency
 from apps.user_portal.models import EndUser
 from apps.user_portal.services import UserService
+from apps.user_portal.tests import merchant_onboarding_payload, ops_approve_onboarding
 
 
 class CustomerVirtualAccountApiTests(TestCase):
@@ -14,27 +15,21 @@ class CustomerVirtualAccountApiTests(TestCase):
         self.svc = UserService()
         self.svc.register(phone="13900000080", password="Test@123", sms_code="")
         self.user = EndUser.objects.get(phone="13900000080")
-        self.svc.choose_role(self.user, "customer")
+        self.svc.choose_role(self.user, "merchant")
         self.user.refresh_from_db()
         self.svc.submit_onboarding(self.user, {
-            "basic": {
-                "legal_name": "VA Opt In Ltd",
-                "id_type": "id_card",
-                "id_number": "VA-ID-001",
-                "contact_phone": "13900000080",
-            },
+            **merchant_onboarding_payload(
+                legal_name="VA Opt In Ltd",
+                id_number="VA-ID-001",
+                contact_phone="13900000080",
+            ),
             "finance": {
                 "bank_name": "Equity Bank",
                 "account_name": "VA Opt In Ltd",
                 "bank_account": "88990011",
             },
-            "images": {
-                "license_image": "kyc/license.png",
-                "id_front_image": "kyc/front.png",
-                "id_back_image": "kyc/back.png",
-            },
         })
-        self.svc.review_onboarding(self.user, action="approve", reviewer="ops")
+        ops_approve_onboarding(self.svc, self.user)
         self.user.refresh_from_db()
         self.client = APIClient()
         token = UserService._generate_token(str(self.user.id), user_type="user")
@@ -152,6 +147,29 @@ class CustomerVirtualAccountApiTests(TestCase):
         self.assertEqual(listed.data["added_cards"][0]["account_number"], "****0011")
         self.assertEqual(listed.data["balances"][0]["currency"], "USD")
         self.assertEqual(listed.data["balances"][0]["balance"], "0.00")
+
+    def test_channels_lists_active_bank_name_and_country(self):
+        from apps.routing.models import BankChannel
+
+        BankChannel.objects.create(
+            bank_code="BOC",
+            bank_name="Bank of China",
+            account_number="6200110000000001",
+            country="China",
+            status=BankChannel.Status.ACTIVE,
+        )
+        BankChannel.objects.create(
+            bank_code="HSBC",
+            bank_name="HSBC Holdings",
+            account_number="6200110000000002",
+            country="United Kingdom",
+            status=BankChannel.Status.SUSPENDED,
+        )
+        res = self.client.get("/api/v1/user/accounts/channels/")
+        self.assertEqual(res.status_code, 200, res.content)
+        self.assertEqual(res.data["items"], [
+            {"bank_name": "Bank of China", "country": "China"},
+        ])
 
     def test_virtual_ledger_lists_deposit_credit(self):
         from apps.account.models import DepositRequest

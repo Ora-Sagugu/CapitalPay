@@ -2,7 +2,7 @@
 from decimal import Decimal
 
 from rest_framework import serializers
-from .models import Agent, AgentMerchant, AgentCommission, AgentKYC
+from .models import Agent, AgentMerchant, AgentCommission, AgentKYC, AgentCustomer
 
 
 class AgentSerializer(serializers.ModelSerializer):
@@ -36,17 +36,10 @@ class AgentSerializer(serializers.ModelSerializer):
         return rate
 
     def update(self, instance, validated_data):
-        old_code = (instance.agent_no or "").strip()
-        new_code = validated_data.get("agent_no", old_code)
-        agent = super().update(instance, validated_data)
-        if old_code and new_code and old_code != new_code:
-            from apps.user_portal.models import UserOnboarding
-
-            UserOnboarding.objects.filter(agent_code__iexact=old_code).update(agent_code=new_code)
-        return agent
+        return super().update(instance, validated_data)
 
     def get_merchant_count(self, obj):
-        return obj.merchant_relations.filter(is_deleted=False).count()
+        return obj.customers.filter(is_deleted=False).count()
 
     def get_total_commission(self, obj):
         from django.db.models import Sum
@@ -92,7 +85,7 @@ class AgentListSerializer(serializers.ModelSerializer):
         ]
 
     def get_merchant_count(self, obj):
-        return obj.merchant_relations.filter(is_deleted=False).count()
+        return obj.customers.filter(is_deleted=False).count()
 
     def get_kyc_status(self, obj):
         kyc = getattr(obj, "kyc", None)
@@ -145,3 +138,23 @@ class AgentKYCSerializer(serializers.ModelSerializer):
         if not validated_data.get("business_license"):
             validated_data["business_license"] = plain or "N/A"
         return super().create(validated_data)
+
+
+class AgentCustomerSerializer(serializers.ModelSerializer):
+    agent_name = serializers.CharField(source="agent.agent_name", read_only=True, allow_null=True)
+    agent_no = serializers.CharField(source="agent.agent_no", read_only=True, allow_null=True)
+    merchant_name = serializers.CharField(source="merchant.merchant_name", read_only=True, allow_null=True)
+    merchant_no = serializers.CharField(source="merchant.merchant_no", read_only=True, allow_null=True)
+
+    class Meta:
+        model = AgentCustomer
+        fields = [
+            "id", "merchant", "merchant_name", "merchant_no",
+            "agent", "agent_name", "agent_no", "customer_no", "legal_name",
+            "contact_name", "contact_phone", "contact_email", "id_type", "id_number",
+            "nationality", "address", "license_expiry_date", "kyb_payload",
+            "kyc_status", "kyc_remark",
+            "reviewed_at", "reviewer", "bank_name", "branch_name", "account_name",
+            "bank_account", "swift_code", "created_at", "updated_at",
+        ]
+        read_only_fields = ["customer_no", "created_at", "updated_at"]

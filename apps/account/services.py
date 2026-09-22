@@ -279,7 +279,10 @@ class AccountService:
             currency = (
                 order.from_currency or order.currency or order.to_currency or "CNY"
             )
-            va = self.merchant_va_for_currency(order.merchant, currency)
+            if order.agent_id:
+                va = self._agent_current_va(order.agent, currency)
+            elif order.merchant_id:
+                va = self.merchant_va_for_currency(order.merchant, currency)
         if not va or not amount or amount <= 0:
             return None
         note = remark or f"Confirm transfer {order.order_no}"
@@ -292,14 +295,15 @@ class AccountService:
             source_type="SETTLEMENT",
             source_id=str(order.id),
         )
-        self.debit_agent_pool_for_outflow(
-            merchant=order.merchant,
-            amount=amount,
-            currency=va.currency or order.from_currency or order.currency or "CNY",
-            origin_source="SETTLEMENT",
-            origin_id=str(order.id),
-            remark=note,
-        )
+        if order.merchant_id:
+            self.debit_agent_pool_for_outflow(
+                merchant=order.merchant,
+                amount=amount,
+                currency=va.currency or order.from_currency or order.currency or "CNY",
+                origin_source="SETTLEMENT",
+                origin_id=str(order.id),
+                remark=note,
+            )
         return entry
 
     def _agent_current_va(self, agent, currency: str) -> VirtualAccount | None:
@@ -400,7 +404,7 @@ class AccountService:
         if source == DepositRequest.DepositSource.AGENT_SELF:
             if not locked.agent_id:
                 raise BusinessException("PARAM_MISSING", "The agent is required for this deposit")
-            # Legacy path retained for ops/tests; agent portal no longer creates AGENT_SELF.
+            # Agent CURRENT self-funding (agent portal and ops).
             self._credit_agent_current(
                 agent=locked.agent,
                 amount=amount,

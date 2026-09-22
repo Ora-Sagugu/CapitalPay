@@ -1,9 +1,10 @@
 <template>
   <div>
-    <PageHeader title="Profiles" subtitle="Agent profiles, settlement banks and KYC status" />
+    <PageHeader title="Profiles" subtitle="Agent profiles, settlement banks and onboarding agreement" />
     <el-tabs v-model="activeTab">
       <el-tab-pane label="Agent profiles" name="agents" />
-      <el-tab-pane label="Agent–customer links" name="merchants" />
+      <el-tab-pane label="Customers" name="merchants" />
+      <el-tab-pane label="Onboarding" name="onboarding" />
     </el-tabs>
     <KpiCards v-if="activeTab === 'agents'" :items="kpis" />
     <div v-if="activeTab === 'agents'" class="page-card">
@@ -30,41 +31,29 @@
             <el-button v-if="canApprove && row.status !== 'ACTIVE'" link type="success" @click="activate(row)">Activate</el-button>
             <el-button v-else-if="canApprove" link type="warning" @click="suspend(row)">Suspend</el-button>
             <el-button link type="primary" @click="openEdit(row)">Edit</el-button>
-            <el-button link type="primary" @click="viewRelations(row)">Customer relationships</el-button>
+            <el-button link type="primary" @click="viewRelations(row)">Customers</el-button>
           </template>
         </el-table-column>
       </el-table>
     </div>
-    <div v-else class="page-card">
+    <div v-else-if="activeTab === 'merchants'" class="page-card">
       <div class="toolbar">
         <el-input v-model="relationFilters.agent_no" placeholder="Agent Code" clearable style="width: 180px" @keyup.enter="queryRelations" />
-        <el-input v-model="relationFilters.merchant_no" placeholder="Customer number" clearable style="width: 180px" @keyup.enter="queryRelations" />
+        <el-input v-model="relationFilters.search" placeholder="Customer name / number" clearable style="width: 220px" @keyup.enter="queryRelations" />
         <el-button type="primary" @click="queryRelations">Search</el-button>
         <el-button @click="resetRelationFilters">Reset</el-button>
-        <el-button type="primary" @click="openCreateRelation">+ New relationship</el-button>
       </div>
       <el-table :data="relationRows" v-loading="relationLoading">
         <el-table-column type="index" label="#" width="55" :index="relationIndex" />
         <el-table-column prop="agent_name" label="Agent" min-width="150" />
-        <el-table-column prop="merchant_name" label="Customer" min-width="150" />
-        <el-table-column prop="commission_rate" label="Commission rate" min-width="110" />
-        <el-table-column prop="effective_from" label="Effective date" min-width="110" />
-        <el-table-column label="Expiry date" min-width="110">
-          <template #default="{ row }">{{ row.effective_to || 'Open-ended' }}</template>
-        </el-table-column>
-        <el-table-column label="Status" width="100">
-          <template #default="{ row }">
-            <el-tag :type="relationStatus(row).type" effect="light">{{ relationStatus(row).label }}</el-tag>
-          </template>
-        </el-table-column>
+        <el-table-column prop="agent_no" label="Agent Code" min-width="130" />
+        <el-table-column prop="customer_no" label="Customer no." min-width="140" />
+        <el-table-column prop="legal_name" label="Customer" min-width="160" />
+        <el-table-column prop="kyc_status" label="KYC" min-width="110" />
+        <el-table-column prop="contact_name" label="Contact" min-width="120" />
+        <el-table-column prop="contact_email" label="Email" min-width="180" />
         <el-table-column label="Creation Time" min-width="165">
           <template #default="{ row }">{{ datetime(row.created_at) }}</template>
-        </el-table-column>
-        <el-table-column label="Actions" width="130" fixed="right">
-          <template #default="{ row }">
-            <el-button link type="primary" @click="openEditRelation(row)">Edit</el-button>
-            <el-button link type="danger" @click="removeRelation(row)">Terminate</el-button>
-          </template>
         </el-table-column>
       </el-table>
       <el-pagination
@@ -76,6 +65,9 @@
         :current-page="relationPage"
         @current-change="onRelationPage"
       />
+    </div>
+    <div v-else-if="activeTab === 'onboarding'">
+      <KycReview embedded portal-role="agent" />
     </div>
     <el-dialog v-model="visible" :title="form.id ? 'Edit agent' : 'New agent'" width="560px">
       <el-form :model="form" label-width="110px">
@@ -95,75 +87,12 @@
         <el-button type="primary" @click="save">Save</el-button>
       </template>
     </el-dialog>
-    <el-dialog v-model="relationVisible" :title="relationForm.id ? 'Edit the agent–customer relationship' : 'Create an agent–customer relationship'" width="560px">
-      <el-form :model="relationForm" label-width="120px">
-        <el-form-item label="Agent" required>
-          <el-select
-            v-model="relationForm.agent"
-            filterable
-            remote
-            reserve-keyword
-            placeholder="Enter agent name or number"
-            :remote-method="loadAgentOptions"
-            :loading="agentOptionsLoading"
-            style="width: 100%"
-          >
-            <el-option
-              v-for="option in agentOptions"
-              :key="option.id"
-              :label="[option.agent_name, option.agent_no].filter(Boolean).join(' · ')"
-              :value="option.id"
-            />
-          </el-select>
-        </el-form-item>
-        <el-form-item label="Customer" required>
-          <el-select
-            v-model="relationForm.merchant"
-            filterable
-            remote
-            reserve-keyword
-            placeholder="Enter the customer name or number"
-            :remote-method="loadMerchantOptions"
-            :loading="merchantOptionsLoading"
-            style="width: 100%"
-          >
-            <el-option
-              v-for="option in merchantOptions"
-              :key="option.id"
-              :label="[option.merchant_name, option.merchant_no].filter(Boolean).join(' · ')"
-              :value="option.id"
-            />
-          </el-select>
-        </el-form-item>
-        <el-form-item label="Commission rate" required>
-          <el-input-number
-            v-model="relationForm.commission_rate"
-            :min="0"
-            :max="1"
-            :precision="6"
-            :step="0.001"
-            controls-position="right"
-            style="width: 100%"
-          />
-        </el-form-item>
-        <el-form-item label="Effective date" required>
-          <el-date-picker v-model="relationForm.effective_from" type="date" value-format="YYYY-MM-DD" style="width: 100%" />
-        </el-form-item>
-        <el-form-item label="Expiry date">
-          <el-date-picker v-model="relationForm.effective_to" type="date" value-format="YYYY-MM-DD" clearable style="width: 100%" />
-        </el-form-item>
-      </el-form>
-      <template #footer>
-        <el-button @click="relationVisible = false">Cancel</el-button>
-        <el-button type="primary" :loading="relationSaving" @click="saveRelation">Save</el-button>
-      </template>
-    </el-dialog>
   </div>
 </template>
 
 <script setup>
 import { computed, onMounted, reactive, ref, watch } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
 import PageHeader from '@/components/PageHeader.vue'
 import KpiCards from '@/components/KpiCards.vue'
 import StatusPill from '@/components/StatusPill.vue'
@@ -174,14 +103,11 @@ import {
   updateAgent,
   activateAgent,
   suspendAgent,
-  getAgentMerchants,
-  createAgentMerchant,
-  updateAgentMerchant,
-  deleteAgentMerchant
+  getAgentCustomers
 } from '@/api/agents'
-import { getMerchants } from '@/api/merchants'
 import { unwrapList, datetime } from '@/utils/format'
 import { useAuthStore } from '@/store/auth'
+import KycReview from '@/views/KycReview.vue'
 
 const auth = useAuthStore()
 const canApprove = computed(() => auth.hasPermission('feature:agents.approve'))
@@ -198,14 +124,7 @@ const relationTotal = ref(0)
 const relationPage = ref(1)
 const relationPageSize = ref(20)
 const relationLoading = ref(false)
-const relationFilters = reactive({ agent_no: '', merchant_no: '' })
-const relationVisible = ref(false)
-const relationSaving = ref(false)
-const relationForm = reactive({ id: '', agent: '', merchant: '', commission_rate: 0, effective_from: '', effective_to: '' })
-const agentOptions = ref([])
-const merchantOptions = ref([])
-const agentOptionsLoading = ref(false)
-const merchantOptionsLoading = ref(false)
+const relationFilters = reactive({ agent_no: '', search: '' })
 const kpis = computed(() => [
   { label: 'All', value: stats.value.total ?? 0 },
   { label: 'Active', value: stats.value.active ?? 0 },
@@ -257,29 +176,17 @@ async function save() {
 async function activate(row) { await activateAgent(row.id); load() }
 async function suspend(row) { await suspendAgent(row.id); load() }
 
-function todayString() {
-  const now = new Date()
-  const month = String(now.getMonth() + 1).padStart(2, '0')
-  const day = String(now.getDate()).padStart(2, '0')
-  return `${now.getFullYear()}-${month}-${day}`
-}
-function relationStatus(row) {
-  const today = todayString()
-  if (row.effective_from && row.effective_from > today) return { label: 'Pending', type: 'warning' }
-  if (row.effective_to && row.effective_to < today) return { label: 'Expired', type: 'info' }
-  return { label: 'Active', type: 'success' }
-}
 function relationIndex(index) {
   return (relationPage.value - 1) * relationPageSize.value + index + 1
 }
 async function loadRelations() {
   relationLoading.value = true
   try {
-    const data = unwrapList(await getAgentMerchants({
+    const data = unwrapList(await getAgentCustomers({
       page: relationPage.value,
       page_size: relationPageSize.value,
-      agent__agent_no: relationFilters.agent_no || undefined,
-      merchant__merchant_no: relationFilters.merchant_no || undefined
+      search: relationFilters.search || undefined,
+      agent__agent_no: relationFilters.agent_no || undefined
     }))
     relationRows.value = data.rows
     relationTotal.value = data.total
@@ -296,7 +203,7 @@ function queryRelations() {
 }
 function resetRelationFilters() {
   relationFilters.agent_no = ''
-  relationFilters.merchant_no = ''
+  relationFilters.search = ''
   queryRelations()
 }
 function onRelationPage(page) {
@@ -305,127 +212,9 @@ function onRelationPage(page) {
 }
 function viewRelations(row) {
   relationFilters.agent_no = row.agent_no
-  relationFilters.merchant_no = ''
+  relationFilters.search = ''
   relationPage.value = 1
   activeTab.value = 'merchants'
-}
-function resetRelationForm() {
-  Object.assign(relationForm, {
-    id: '',
-    agent: '',
-    merchant: '',
-    commission_rate: 0,
-    effective_from: todayString(),
-    effective_to: ''
-  })
-}
-async function loadAgentOptions(keyword = '') {
-  const selected = agentOptions.value.find((option) => option.id === relationForm.agent)
-  agentOptionsLoading.value = true
-  try {
-    const options = unwrapList(await getAgents({ search: keyword || undefined })).rows
-    if (selected && !options.some((option) => option.id === selected.id)) options.unshift(selected)
-    agentOptions.value = options
-  } catch {
-    agentOptions.value = selected ? [selected] : []
-  } finally {
-    agentOptionsLoading.value = false
-  }
-}
-async function loadMerchantOptions(keyword = '') {
-  const selected = merchantOptions.value.find((option) => option.id === relationForm.merchant)
-  merchantOptionsLoading.value = true
-  try {
-    const options = unwrapList(await getMerchants({ search: keyword || undefined })).rows
-    if (selected && !options.some((option) => option.id === selected.id)) options.unshift(selected)
-    merchantOptions.value = options
-  } catch {
-    merchantOptions.value = selected ? [selected] : []
-  } finally {
-    merchantOptionsLoading.value = false
-  }
-}
-function openCreateRelation() {
-  resetRelationForm()
-  const presetAgent = rows.value.find((row) => row.agent_no === relationFilters.agent_no)
-  if (presetAgent) {
-    relationForm.agent = presetAgent.id
-    agentOptions.value = [presetAgent]
-  } else {
-    agentOptions.value = []
-  }
-  merchantOptions.value = []
-  relationVisible.value = true
-  loadAgentOptions(presetAgent?.agent_name || '')
-  loadMerchantOptions()
-}
-function openEditRelation(row) {
-  Object.assign(relationForm, {
-    id: row.id,
-    agent: row.agent,
-    merchant: row.merchant,
-    commission_rate: Number(row.commission_rate || 0),
-    effective_from: row.effective_from,
-    effective_to: row.effective_to || ''
-  })
-  agentOptions.value = [{ id: row.agent, agent_name: row.agent_name }]
-  merchantOptions.value = [{ id: row.merchant, merchant_name: row.merchant_name }]
-  relationVisible.value = true
-  loadAgentOptions(row.agent_name)
-  loadMerchantOptions(row.merchant_name)
-}
-async function saveRelation() {
-  if (!relationForm.agent || !relationForm.merchant || !relationForm.effective_from) {
-    ElMessage.warning('The agent, customer and effective date are required.')
-    return
-  }
-  if (relationForm.effective_to && relationForm.effective_to < relationForm.effective_from) {
-    ElMessage.warning('The expiry date cannot precede the effective date.')
-    return
-  }
-  const rate = Number(relationForm.commission_rate)
-  if (Number.isNaN(rate) || rate < 0 || rate > 1) {
-    ElMessage.warning('The commission rate must be between 0 and 1.')
-    return
-  }
-  const payload = {
-    agent: relationForm.agent,
-    merchant: relationForm.merchant,
-    commission_rate: rate,
-    effective_from: relationForm.effective_from,
-    effective_to: relationForm.effective_to || null
-  }
-  relationSaving.value = true
-  try {
-    if (relationForm.id) await updateAgentMerchant(relationForm.id, payload)
-    else await createAgentMerchant(payload)
-    ElMessage.success('The agent–customer relationship has been saved.')
-    relationVisible.value = false
-    await loadRelations()
-  } catch {
-    // The request layer displays the backend error; keep the dialog open for correction.
-  } finally {
-    relationSaving.value = false
-  }
-}
-async function removeRelation(row) {
-  try {
-    await ElMessageBox.confirm(`Confirm termination of the relationship “${row.agent_name} — ${row.merchant_name}”?`, 'Terminate the agent–customer relationship', {
-      confirmButtonText: 'Terminate',
-      cancelButtonText: 'Cancel',
-      type: 'warning'
-    })
-  } catch {
-    return
-  }
-  try {
-    await deleteAgentMerchant(row.id)
-    ElMessage.success('The relationship has been terminated.')
-    if (relationRows.value.length === 1 && relationPage.value > 1) relationPage.value -= 1
-    await loadRelations()
-  } catch {
-    // Request errors are reported by the global interceptor.
-  }
 }
 watch(activeTab, (value) => {
   if (value === 'merchants') loadRelations()

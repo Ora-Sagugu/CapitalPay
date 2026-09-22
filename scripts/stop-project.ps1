@@ -6,7 +6,7 @@ $services = @(
     @{ Name = "backend"; Port = 1024 },
     @{ Name = "client-portal"; Port = 1025 },
     @{ Name = "agent-portal"; Port = 1026 },
-    @{ Name = "customer-portal"; Port = 1027 }
+    @{ Name = "merchant-portal"; Port = 1027 }
 )
 
 function Test-Port {

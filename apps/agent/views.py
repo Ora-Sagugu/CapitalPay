@@ -1,19 +1,21 @@
 """Agent API views"""
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
+from rest_framework.exceptions import PermissionDenied
 from rest_framework.response import Response
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework.filters import SearchFilter, OrderingFilter
 
 from django.db.models import Count, Q
 
-from .models import Agent, AgentMerchant, AgentCommission, AgentKYC
+from .models import Agent, AgentMerchant, AgentCommission, AgentKYC, AgentCustomer
 from .serializers import (
     AgentSerializer, AgentListSerializer,
     AgentMerchantSerializer, AgentCommissionSerializer,
-    AgentKYCSerializer,
+    AgentKYCSerializer, AgentCustomerSerializer,
 )
 from .services import ensure_agent_accounts, ensure_agent_api_credentials, build_agent_fee_overview
+from apps.core.exceptions import BusinessException
 from apps.rbac.authentication import JWTAuthentication
 from apps.rbac.permissions import RequiresFeature
 
@@ -43,16 +45,13 @@ class AgentViewSet(RequiresFeature, viewsets.ModelViewSet):
             .select_related("kyc")
             .annotate(
                 customer_count=Count(
-                    "direct_merchants",
-                    filter=Q(direct_merchants__is_deleted=False),
+                    "customers",
+                    filter=Q(customers__is_deleted=False),
                     distinct=True,
                 ),
                 order_count=Count(
-                    "direct_merchants__orders",
-                    filter=Q(
-                        direct_merchants__is_deleted=False,
-                        direct_merchants__orders__is_deleted=False,
-                    ),
+                    "orders",
+                    filter=Q(orders__is_deleted=False),
                     distinct=True,
                 ),
             )
@@ -93,10 +92,8 @@ class AgentViewSet(RequiresFeature, viewsets.ModelViewSet):
 
     @action(detail=True, methods=["get"])
     def merchants(self, request, pk=None):
-        agent = self.get_object()
-        relations = agent.merchant_relations.filter(is_deleted=False)
-        serializer = AgentMerchantSerializer(relations, many=True)
-        return Response(serializer.data)
+        """Legacy alias — customers are merchant-owned; returns empty for agents."""
+        return Response([])
 
     @action(detail=True, methods=["get"])
     def commissions(self, request, pk=None):
@@ -109,6 +106,38 @@ class AgentViewSet(RequiresFeature, viewsets.ModelViewSet):
     def fee_overview(self, request, pk=None):
         agent = self.get_object()
         return Response(build_agent_fee_overview(agent))
+
+
+class AgentCustomerViewSet(RequiresFeature, viewsets.ReadOnlyModelViewSet):
+    """Merchant-owned customer profiles (no login, no wallet)."""
+    authentication_classes = [JWTAuthentication]
+    feature_code = "feature:customers"
+    queryset = AgentCustomer.objects.filter(is_deleted=False).select_related("merchant", "agent")
+    serializer_class = AgentCustomerSerializer
+    filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
+    filterset_fields = ["merchant", "agent", "kyc_status", "merchant__merchant_no", "agent__agent_no"]
+    search_fields = ["customer_no", "legal_name", "contact_name", "contact_email", "id_number", "nationality"]
+    ordering = ["-created_at"]
+
+    def check_feature(self, request):
+        """Allow feature:customers or legacy feature:agents (Agents tab)."""
+        from apps.rbac.models import SystemUser
+        from apps.rbac.services import PermissionService
+
+        user = getattr(request, "user", None)
+        if not user or not getattr(user, "is_authenticated", False):
+            raise PermissionDenied("Authentication credentials were not provided")
+        if not isinstance(user, SystemUser):
+            raise PermissionDenied("Access is restricted to operations principals")
+        user_id = str(getattr(user, "id", None) or getattr(user, "pk", None))
+        service = PermissionService()
+        try:
+            service.check_page_access(user_id, "feature:customers")
+        except BusinessException:
+            try:
+                service.check_page_access(user_id, "feature:agents")
+            except BusinessException as exc:
+                raise PermissionDenied(exc.message) from exc
 
 
 class AgentMerchantViewSet(RequiresFeature, viewsets.ModelViewSet):

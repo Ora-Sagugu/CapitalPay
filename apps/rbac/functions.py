@@ -1,48 +1,70 @@
 """Operations-console capability catalog.
 
 Each item is a business a job title may be ticked for on Roles.
-Page-level codes unlock the sidebar; `.approve` codes gate review/execute APIs.
-Super Admin bypasses these codes and is not stored on RolePermission.
+Page-level codes unlock the sidebar; write / approve / suspend / export /
+freeze codes gate sensitive APIs. Super Admin bypasses these codes and is
+not stored on RolePermission.
 """
 
 from __future__ import annotations
 
-ASSIGNABLE_ROLE_CODES = ("maker", "checker", "authoriser")
+ASSIGNABLE_ROLE_CODES = (
+    "merchant_ops",
+    "compliance",
+    "finance",
+    "support",
+    "analyst",
+)
 SYSTEM_ROLE_CODES = ("super_admin",) + ASSIGNABLE_ROLE_CODES
 
 OPS_ROLES = (
     {
         "code": "super_admin",
         "name": "Super Admin",
-        "description": "Always has every business. Capabilities cannot be changed.",
+        "description": "Platform configuration, ops account permissions, high-risk approvals, and overall PSP oversight.",
     },
     {
-        "code": "maker",
-        "name": "Maker",
-        "description": "Performs the businesses ticked for this title.",
+        "code": "merchant_ops",
+        "name": "Merchant Ops",
+        "description": "Reviews merchant accounts, onboarding status, and service configuration; handles merchant ops issues.",
     },
     {
-        "code": "checker",
-        "name": "Checker",
-        "description": "Performs the businesses ticked for this title.",
+        "code": "compliance",
+        "name": "Compliance / Risk",
+        "description": "Reviews KYC/KYB outcomes, anomalies, fraud alerts, and risk cases; can restrict accounts.",
     },
     {
-        "code": "authoriser",
-        "name": "Authoriser",
-        "description": "Performs the businesses ticked for this title.",
+        "code": "finance",
+        "name": "Finance",
+        "description": "Monitors fees, settlement, wallet balances, transfers, and reconciliation; handles finance adjustments.",
+    },
+    {
+        "code": "support",
+        "name": "Customer Support",
+        "description": "Investigates merchant issues using merchant, transaction, refund, settlement, and transfer records.",
+    },
+    {
+        "code": "analyst",
+        "name": "Analyst / Read-only",
+        "description": "Views ops reports and analytics within authorized scope; cannot run sensitive business actions.",
     },
 )
 
 LEGACY_ROLE_MAP = {
-    "operator": "maker",
-    "reviewer": "checker",
-    "approver": "authoriser",
+    "maker": "merchant_ops",
+    "checker": "compliance",
+    "authoriser": "finance",
+    "operator": "merchant_ops",
+    "reviewer": "compliance",
+    "approver": "finance",
 }
 RETIRED_ROLE_CODES = (
+    "maker",
+    "checker",
+    "authoriser",
     "operator",
     "reviewer",
     "approver",
-    "finance",
     "auditor",
     "merchant_admin",
 )
@@ -64,9 +86,14 @@ def _cap(code, name, action, group, group_name, path, page, resource):
 OPS_CAPABILITIES = (
     _cap("feature:dashboard", "View overview", "view", "", "", "/dashboard", "feature:dashboard", "dashboard"),
     _cap("feature:reports", "View reports", "view", "", "", "/reports", "feature:reports", "report"),
+    _cap("feature:reports.export", "Export reports", "export", "", "", "/reports", "feature:reports", "report"),
     _cap("feature:wallet", "View wallet", "view", "", "", "/wallet", "feature:wallet", "wallet"),
+    _cap("feature:wallet.freeze", "Freeze / unfreeze wallet", "freeze", "", "", "/wallet", "feature:wallet", "wallet"),
     _cap("feature:merchants", "View customer profiles", "view", "customer", "Customers", "/merchants", "feature:merchants", "customer"),
-    _cap("feature:merchants.approve", "Approve customers", "approve", "customer", "Customers", "/merchants", "feature:merchants", "customer"),
+    _cap("feature:merchants.write", "Create / edit customers", "write", "customer", "Customers", "/merchants", "feature:merchants", "customer"),
+    _cap("feature:merchants.approve", "Approve / activate customers", "approve", "customer", "Customers", "/merchants", "feature:merchants", "customer"),
+    _cap("feature:merchants.suspend", "Suspend / restrict customers", "suspend", "customer", "Customers", "/merchants", "feature:merchants", "customer"),
+    _cap("feature:customers", "View end customers", "view", "customer", "Customers", "/customers", "feature:customers", "customer"),
     _cap("feature:virtual_accounts", "Manage virtual accounts", "manage", "customer", "Customers", "/virtual-accounts", "feature:virtual_accounts", "customer"),
     _cap("feature:deposits", "View deposits", "view", "customer", "Customers", "/deposits", "feature:deposits", "customer"),
     _cap("feature:deposits.approve", "Approve deposits", "approve", "customer", "Customers", "/deposits", "feature:deposits", "customer"),
@@ -94,9 +121,92 @@ OPS_CAPABILITIES = (
     _cap("feature:sanctions", "Manage sanction lists", "manage", "sanction", "Sanctions", "/sanctions", "feature:sanctions", "sanction"),
     _cap("feature:scans", "View screening", "view", "sanction", "Sanctions", "/scans", "feature:scans", "sanction"),
     _cap("feature:risk_rating", "Set risk rating", "set", "sanction", "Sanctions", "/risk-rating", "feature:risk_rating", "sanction"),
-    _cap("feature:roles", "Assign role businesses", "manage", "system", "System", "/roles", "feature:roles", "system"),
+    _cap("feature:roles", "Assign role functions", "manage", "system", "System", "/roles", "feature:roles", "system"),
     _cap("feature:users", "Manage operations users", "manage", "system", "System", "/users", "feature:users", "system"),
+    _cap("feature:audit_logs", "View audit logs", "view", "system", "System", "/users", "feature:users", "system"),
 )
+
+# Default grants from docs/角色权限.csv (是 = action codes; 受限 = related view only).
+# Extra read-only pages follow docs/角色(1).csv duties so menus are usable.
+DEFAULT_ROLE_CAPABILITIES = {
+    "merchant_ops": (
+        "feature:dashboard",
+        "feature:merchants",
+        "feature:merchants.write",
+        "feature:merchants.approve",
+        "feature:customers",
+        "feature:agents",
+        "feature:agents.approve",
+        "feature:virtual_accounts",
+        "feature:deposits",
+        "feature:fund_trace",
+        "feature:orders",
+        "feature:pre_orders",
+        "feature:refunds",
+        "feature:reports",
+        "feature:audit_logs",
+    ),
+    "compliance": (
+        "feature:dashboard",
+        "feature:merchants",
+        "feature:customers",
+        "feature:agents",
+        "feature:merchants.suspend",
+        "feature:deposits",
+        "feature:orders",
+        "feature:fund_trace",
+        "feature:reports",
+        "feature:sanctions",
+        "feature:scans",
+        "feature:risk_rating",
+        "feature:audit_logs",
+    ),
+    "finance": (
+        "feature:dashboard",
+        "feature:merchants",
+        "feature:customers",
+        "feature:wallet",
+        "feature:deposits",
+        "feature:fund_trace",
+        "feature:orders",
+        "feature:pre_orders",
+        "feature:refunds",
+        "feature:refunds.approve",
+        "feature:remittance_fees",
+        "feature:agent_fees",
+        "feature:params",
+        "feature:reconciliation",
+        "feature:fund_transfers",
+        "feature:adjustments",
+        "feature:reports",
+        "feature:reports.export",
+        "feature:audit_logs",
+        "feature:disbursements",
+        "feature:exchange_rates",
+    ),
+    "support": (
+        "feature:dashboard",
+        "feature:merchants",
+        "feature:customers",
+        "feature:virtual_accounts",
+        "feature:deposits",
+        "feature:fund_trace",
+        "feature:orders",
+        "feature:pre_orders",
+        "feature:refunds",
+        "feature:disbursements",
+        "feature:fund_transfers",
+        "feature:reports",
+        "feature:audit_logs",
+        "feature:wallet",
+    ),
+    "analyst": (
+        "feature:dashboard",
+        "feature:merchants",
+        "feature:customers",
+        "feature:reports",
+    ),
+}
 
 # Page-level aliases kept for callers that still import OPS_FUNCTIONS.
 OPS_FUNCTIONS = OPS_CAPABILITIES

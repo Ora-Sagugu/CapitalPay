@@ -13,7 +13,7 @@
         <el-table-column label="Volume" min-width="140">
           <template #default="{ row }">{{ money(row.volume) }}</template>
         </el-table-column>
-        <el-table-column label="Customer fees" min-width="140">
+        <el-table-column label="Merchant fees" min-width="140">
           <template #default="{ row }">{{ money(row.customer_fee) }}</template>
         </el-table-column>
         <el-table-column label="Agent share" min-width="140">
@@ -25,7 +25,7 @@
       <h3 class="section-title">Recent transactions</h3>
       <el-table :data="overview?.recent_orders || []" v-loading="loading">
         <el-table-column prop="order_no" label="Order" min-width="160" />
-        <el-table-column prop="customer_name" label="Customer" min-width="150" />
+        <el-table-column prop="customer_name" label="Merchant" min-width="150" />
         <el-table-column prop="currency" label="Currency" width="100" />
         <el-table-column label="Amount" min-width="120">
           <template #default="{ row }">{{ money(row.amount) }}</template>
@@ -90,7 +90,7 @@ const kpis = computed(() => {
   const data = overview.value || {}
   return [
     { label: 'Share', value: `${sharePercent(data.commission_rate)}%` },
-    { label: 'Customers', value: data.customer_count ?? 0 },
+    { label: 'Merchants', value: data.customer_count ?? 0 },
     { label: 'Orders', value: data.order_count ?? 0 },
     { label: 'Currencies', value: data.currency_count ?? 0 },
   ]

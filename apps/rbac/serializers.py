@@ -1,5 +1,9 @@
 """RBAC DRF 序列化器 — 账号、角色、权限的序列化。"""
+import re
+
 from rest_framework import serializers
+
+from .functions import RETIRED_ROLE_CODES, SYSTEM_ROLE_CODES
 from .models import SystemUser, Role, Permission, UserRole, OperationLog, RolePermission
 
 
@@ -57,6 +61,26 @@ class RoleSerializer(serializers.ModelSerializer):
             "created_at",
         ]
         read_only_fields = ["id", "is_system", "created_at"]
+
+    def validate_code(self, value):
+        code = (value or "").strip()
+        if not code:
+            raise serializers.ValidationError("Role code is required.")
+        if not re.fullmatch(r"[a-z][a-z0-9_]{1,63}", code):
+            raise serializers.ValidationError(
+                "Use lowercase letters, digits and underscores, starting with a letter."
+            )
+        if self.instance is None and (
+            code in SYSTEM_ROLE_CODES or code in RETIRED_ROLE_CODES
+        ):
+            raise serializers.ValidationError("This role code is reserved by the system.")
+        return code
+
+    def validate_name(self, value):
+        name = (value or "").strip()
+        if not name:
+            raise serializers.ValidationError("Role name is required.")
+        return name
 
     def get_permission_count(self, obj):
         return RolePermission.objects.filter(role=obj, is_deleted=False).count()

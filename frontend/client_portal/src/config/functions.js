@@ -1,18 +1,25 @@
 export const ASSIGNABLE_ROLES = [
-  { code: 'maker', name: 'Maker' },
-  { code: 'checker', name: 'Checker' },
-  { code: 'authoriser', name: 'Authoriser' }
+  { code: 'merchant_ops', name: 'Merchant Ops' },
+  { code: 'compliance', name: 'Compliance / Risk' },
+  { code: 'finance', name: 'Finance' },
+  { code: 'support', name: 'Customer Support' },
+  { code: 'analyst', name: 'Analyst / Read-only' }
 ]
 
 export const OPS_CAPABILITIES = [
   { code: 'feature:dashboard', name: 'View overview', action: 'view', group: '', groupName: '', path: '/dashboard', page: 'feature:dashboard' },
   { code: 'feature:reports', name: 'View reports', action: 'view', group: '', groupName: '', path: '/reports', page: 'feature:reports' },
+  { code: 'feature:reports.export', name: 'Export reports', action: 'export', group: '', groupName: '', path: '/reports', page: 'feature:reports' },
   { code: 'feature:wallet', name: 'View wallet', action: 'view', group: '', groupName: '', path: '/wallet', page: 'feature:wallet' },
-  { code: 'feature:merchants', name: 'View customer profiles', action: 'view', group: 'customer', groupName: 'Customers', path: '/merchants', page: 'feature:merchants' },
-  { code: 'feature:merchants.approve', name: 'Approve customers', action: 'approve', group: 'customer', groupName: 'Customers', path: '/merchants', page: 'feature:merchants' },
-  { code: 'feature:virtual_accounts', name: 'Manage virtual accounts', action: 'manage', group: 'customer', groupName: 'Customers', path: '/virtual-accounts', page: 'feature:virtual_accounts' },
-  { code: 'feature:deposits', name: 'View deposits', action: 'view', group: 'customer', groupName: 'Customers', path: '/deposits', page: 'feature:deposits' },
-  { code: 'feature:deposits.approve', name: 'Approve deposits', action: 'approve', group: 'customer', groupName: 'Customers', path: '/deposits', page: 'feature:deposits' },
+  { code: 'feature:wallet.freeze', name: 'Freeze / unfreeze wallet', action: 'freeze', group: '', groupName: '', path: '/wallet', page: 'feature:wallet' },
+  { code: 'feature:merchants', name: 'View merchant profiles', action: 'view', group: 'customer', groupName: 'Merchants', path: '/merchants', page: 'feature:merchants' },
+  { code: 'feature:merchants.write', name: 'Create / edit merchants', action: 'write', group: 'customer', groupName: 'Merchants', path: '/merchants', page: 'feature:merchants' },
+  { code: 'feature:merchants.approve', name: 'Approve / activate merchants', action: 'approve', group: 'customer', groupName: 'Merchants', path: '/merchants', page: 'feature:merchants' },
+  { code: 'feature:merchants.suspend', name: 'Suspend / restrict merchants', action: 'suspend', group: 'customer', groupName: 'Merchants', path: '/merchants', page: 'feature:merchants' },
+  { code: 'feature:customers', name: 'View end customers', action: 'view', group: 'customer', groupName: 'Merchants', path: '/customers', page: 'feature:customers' },
+  { code: 'feature:virtual_accounts', name: 'Manage virtual accounts', action: 'manage', group: 'customer', groupName: 'Merchants', path: '/virtual-accounts', page: 'feature:virtual_accounts' },
+  { code: 'feature:deposits', name: 'View deposits', action: 'view', group: 'customer', groupName: 'Merchants', path: '/deposits', page: 'feature:deposits' },
+  { code: 'feature:deposits.approve', name: 'Approve deposits', action: 'approve', group: 'customer', groupName: 'Merchants', path: '/deposits', page: 'feature:deposits' },
   { code: 'feature:fund_trace', name: 'View fund trace', action: 'view', group: 'remittance', groupName: 'Remittance', path: '/fund-trace', page: 'feature:fund_trace' },
   { code: 'feature:orders', name: 'View orders', action: 'view', group: 'remittance', groupName: 'Remittance', path: '/orders', page: 'feature:orders' },
   { code: 'feature:orders.approve', name: 'Approve remittances', action: 'approve', group: 'remittance', groupName: 'Remittance', path: '/orders', page: 'feature:orders' },
@@ -37,8 +44,9 @@ export const OPS_CAPABILITIES = [
   { code: 'feature:sanctions', name: 'Manage sanction lists', action: 'manage', group: 'sanction', groupName: 'Sanctions', path: '/sanctions', page: 'feature:sanctions' },
   { code: 'feature:scans', name: 'View screening', action: 'view', group: 'sanction', groupName: 'Sanctions', path: '/scans', page: 'feature:scans' },
   { code: 'feature:risk_rating', name: 'Set risk rating', action: 'set', group: 'sanction', groupName: 'Sanctions', path: '/risk-rating', page: 'feature:risk_rating' },
-  { code: 'feature:roles', name: 'Assign role businesses', action: 'manage', group: 'system', groupName: 'System', path: '/roles', page: 'feature:roles' },
-  { code: 'feature:users', name: 'Manage operations users', action: 'manage', group: 'system', groupName: 'System', path: '/users', page: 'feature:users' }
+  { code: 'feature:roles', name: 'Assign role functions', action: 'manage', group: 'system', groupName: 'System', path: '/roles', page: 'feature:roles' },
+  { code: 'feature:users', name: 'Manage operations users', action: 'manage', group: 'system', groupName: 'System', path: '/users', page: 'feature:users' },
+  { code: 'feature:audit_logs', name: 'View audit logs', action: 'view', group: 'system', groupName: 'System', path: '/users', page: 'feature:users' }
 ]
 
 const PAGE_CODES = {}

@@ -1,6 +1,94 @@
 """支付交易 — DRF 序列化器。"""
+from decimal import Decimal, ROUND_HALF_UP
+
+from django.conf import settings
 from rest_framework import serializers
+
 from .models import BankCreditNotification, PaymentOrder, RefundOrder
+
+MONEY = Decimal("0.01")
+
+
+def _quantize_money(value) -> Decimal:
+    return Decimal(str(value or 0)).quantize(MONEY, rounding=ROUND_HALF_UP)
+
+
+def _empty_fee_breakdown():
+    return {
+        "bank_fee": None,
+        "remittance_profit": None,
+        "agent_fee": None,
+        "capitalpay_profit": None,
+    }
+
+
+def resolve_order_fee_breakdown(order):
+    """Resolve fee stack for order detail display.
+
+    Remittance Fee − Bank Fee = Remittance Profit
+    Remittance Profit splits by Agent Edit share into Agent Fee + CapitalPay Profit.
+    """
+    remittance_fee = _quantize_money(order.fee_amount)
+    share = next(
+        (item for item in order.fee_shares.all() if not item.is_deleted),
+        None,
+    )
+
+    if not getattr(settings, "ENABLE_BANKING", True):
+        if share is not None:
+            bank_fee = _quantize_money(share.channel_fee)
+            return {
+                "bank_fee": bank_fee,
+                "remittance_profit": _quantize_money(remittance_fee - bank_fee),
+                "agent_fee": _quantize_money(share.agent_fee),
+                "capitalpay_profit": _quantize_money(share.platform_fee),
+            }
+        return {
+            "bank_fee": Decimal("0.00"),
+            "remittance_profit": remittance_fee,
+            "agent_fee": None,
+            "capitalpay_profit": None,
+        }
+
+    bank_fee = None
+    splits = [leg for leg in (getattr(order, "payout_splits", None) or []) if leg]
+    if share is not None and (share.channel_fee or order.bank_code or splits):
+        bank_fee = _quantize_money(share.channel_fee)
+    elif len(splits) >= 2:
+        from apps.routing.services import RoutingService
+
+        payout_amount = RoutingService.payout_amount_for_order(order)
+        bank_fee = _quantize_money(
+            RoutingService.channel_fee_for_order(order, payout_amount),
+        )
+    elif order.bank_code:
+        from apps.routing.services import RoutingService
+        from apps.settlement.engine.calculator import SettlementCalculator
+
+        channel = SettlementCalculator._lookup_bank_channel(order)
+        if channel is not None:
+            payout_amount = RoutingService.payout_amount_for_order(order)
+            bank_fee = _quantize_money(
+                RoutingService._channel_fee(channel, payout_amount),
+            )
+
+    if bank_fee is None:
+        return _empty_fee_breakdown()
+
+    remittance_profit = _quantize_money(remittance_fee - bank_fee)
+    if share is not None:
+        return {
+            "bank_fee": bank_fee,
+            "remittance_profit": remittance_profit,
+            "agent_fee": _quantize_money(share.agent_fee),
+            "capitalpay_profit": _quantize_money(share.platform_fee),
+        }
+    return {
+        "bank_fee": bank_fee,
+        "remittance_profit": remittance_profit,
+        "agent_fee": None,
+        "capitalpay_profit": None,
+    }
 
 
 # ── 预下单 ─────────────────────────────────────────────────
@@ -44,8 +132,8 @@ class PreOrderResponseSerializer(serializers.Serializer):
 
 class PaymentOrderListSerializer(serializers.ModelSerializer):
     """订单列表 — 含汇款信息、审核信息。"""
-    merchant_name = serializers.CharField(source="merchant.merchant_name", read_only=True)
-    merchant_no = serializers.CharField(source="merchant.merchant_no", read_only=True)
+    merchant_name = serializers.SerializerMethodField()
+    merchant_no = serializers.SerializerMethodField()
 
     class Meta:
         model = PaymentOrder
@@ -67,8 +155,14 @@ class PaymentOrderListSerializer(serializers.ModelSerializer):
             "completed_at", "created_at",
         ]
 
+    def get_merchant_name(self, obj):
+        return obj.party_name
 
-def _timeline_step(code, title, at, *, verified=False, active=False):
+    def get_merchant_no(self, obj):
+        return obj.party_no
+
+
+def _timeline_step(code, title, at, verified=False, active=False):
     return {
         "code": code,
         "title": title,
@@ -194,7 +288,7 @@ def build_order_timeline(order):
 
 
 class PaymentOrderSerializer(serializers.ModelSerializer):
-    merchant_name = serializers.CharField(source="merchant.merchant_name", read_only=True)
+    merchant_name = serializers.SerializerMethodField()
 
     class Meta:
         model = PaymentOrder
@@ -207,7 +301,7 @@ class PaymentOrderSerializer(serializers.ModelSerializer):
             "beneficiary_name", "beneficiary_bank", "beneficiary_swift",
             "beneficiary_account", "beneficiary_address",
             "remittance_purpose", "contract_file",
-            "status", "pay_method", "bank_code", "unique_identification_no",
+            "status", "pay_method", "bank_code", "payout_splits", "unique_identification_no",
             "prn_code",
             "notify_url", "notify_status", "notify_count", "last_notify_at",
             "pay_received_at", "settled_at", "closed_at", "expire_at",
@@ -228,21 +322,58 @@ class PaymentOrderSerializer(serializers.ModelSerializer):
             "agent_payout_requested_at",
         ]
 
+    def get_merchant_name(self, obj):
+        return obj.party_name
+
 
 class PaymentOrderDetailSerializer(PaymentOrderSerializer):
-    merchant_no = serializers.CharField(source="merchant.merchant_no", read_only=True)
+    merchant_no = serializers.SerializerMethodField()
     pay_method_display = serializers.CharField(source="get_pay_method_display", read_only=True)
     status_display = serializers.CharField(source="get_status_display", read_only=True)
     timeline = serializers.SerializerMethodField()
     quote_detail = serializers.SerializerMethodField()
     refunds = serializers.SerializerMethodField()
+    bank_fee = serializers.SerializerMethodField()
+    remittance_profit = serializers.SerializerMethodField()
+    agent_fee = serializers.SerializerMethodField()
+    capitalpay_profit = serializers.SerializerMethodField()
 
     class Meta(PaymentOrderSerializer.Meta):
         fields = PaymentOrderSerializer.Meta.fields + [
             "merchant_no", "user_id", "bank_txn_id", "completed_at",
             "status_history", "idempotency_key", "request_payload_hash",
             "pay_method_display", "status_display", "timeline", "quote_detail", "refunds",
+            "bank_fee", "remittance_profit", "agent_fee", "capitalpay_profit",
         ]
+
+    def _fee_breakdown(self, obj):
+        cache = getattr(self, "_fee_breakdown_cache", None)
+        if cache is None:
+            cache = {}
+            self._fee_breakdown_cache = cache
+        key = str(getattr(obj, "pk", None) or id(obj))
+        if key not in cache:
+            cache[key] = resolve_order_fee_breakdown(obj)
+        return cache[key]
+
+    def _fee_field(self, obj, name):
+        value = self._fee_breakdown(obj).get(name)
+        return str(value) if value is not None else None
+
+    def get_bank_fee(self, obj):
+        return self._fee_field(obj, "bank_fee")
+
+    def get_remittance_profit(self, obj):
+        return self._fee_field(obj, "remittance_profit")
+
+    def get_agent_fee(self, obj):
+        return self._fee_field(obj, "agent_fee")
+
+    def get_capitalpay_profit(self, obj):
+        return self._fee_field(obj, "capitalpay_profit")
+
+    def get_merchant_no(self, obj):
+        return obj.party_no
 
     def get_timeline(self, obj):
         return build_order_timeline(obj)
@@ -286,6 +417,7 @@ class PaymentOrderDetailSerializer(PaymentOrderSerializer):
 
 class RemittanceQuoteRequestSerializer(serializers.Serializer):
     merchant = serializers.CharField(max_length=32, required=False, allow_blank=True)
+    customer_id = serializers.CharField(max_length=64, required=False, allow_blank=True)
     amount = serializers.DecimalField(max_digits=18, decimal_places=2, min_value=0.01)
     from_currency = serializers.CharField(max_length=3, default="USD")
     to_currency = serializers.CharField(max_length=3, default="CNY")
@@ -300,6 +432,7 @@ class RemittanceQuoteRequestSerializer(serializers.Serializer):
 
 class RemittanceSubmitSerializer(serializers.Serializer):
     quote_id = serializers.CharField(max_length=40)
+    customer_id = serializers.CharField(max_length=64, required=False, allow_blank=True)
     beneficiary_name = serializers.CharField(max_length=128, trim_whitespace=True)
     beneficiary_bank = serializers.CharField(max_length=128, trim_whitespace=True)
     beneficiary_account = serializers.CharField(max_length=64, trim_whitespace=True)
@@ -315,6 +448,11 @@ class RemittanceSubmitSerializer(serializers.Serializer):
     contract_file = serializers.CharField(
         max_length=512, required=False, allow_blank=True, allow_null=True
     )
+    pay_method = serializers.ChoiceField(
+        choices=PaymentOrder.REMITTANCE_FUNDING_METHODS,
+        default=PaymentOrder.PayMethod.WIRE_TRANSFER,
+        required=False,
+    )
 
     def validate(self, attrs):
         for field in (
@@ -322,6 +460,7 @@ class RemittanceSubmitSerializer(serializers.Serializer):
             "remittance_purpose", "contract_file",
         ):
             attrs[field] = attrs.get(field) or ""
+        attrs["pay_method"] = attrs.get("pay_method") or PaymentOrder.PayMethod.WIRE_TRANSFER
         return attrs
 
 
@@ -361,7 +500,7 @@ class RefundReviewSerializer(serializers.Serializer):
 
 class RefundOrderSerializer(serializers.ModelSerializer):
     order_no = serializers.CharField(source="payment_order.order_no", read_only=True)
-    merchant_name = serializers.CharField(source="payment_order.merchant.merchant_name", read_only=True, default="")
+    merchant_name = serializers.SerializerMethodField()
     amount = serializers.DecimalField(source="payment_order.amount", max_digits=18, decimal_places=2, read_only=True)
 
     class Meta:
@@ -373,6 +512,10 @@ class RefundOrderSerializer(serializers.ModelSerializer):
             "fail_reason", "bank_refund_id", "created_at",
         ]
         read_only_fields = fields
+
+    def get_merchant_name(self, obj):
+        order = obj.payment_order
+        return order.party_name if order else ""
 
 
 class BankCreditNotificationSerializer(serializers.ModelSerializer):
@@ -407,7 +550,9 @@ class BankCreditNotificationDetailSerializer(BankCreditNotificationSerializer):
         return obj.order.status if obj.order_id else ""
 
     def get_expected_amount(self, obj):
-        return str(obj.order.amount) if obj.order_id else ""
+        if not obj.order_id:
+            return ""
+        return str(obj.order.expected_collection_amount())
 
     def get_expected_currency(self, obj):
         if not obj.order_id:

@@ -51,7 +51,7 @@ updates = {
     "ALLOWED_HOSTS": public_ip,
     "CSRF_TRUSTED_ORIGINS": f"http://{public_ip},https://{public_ip}",
     "CORS_ALLOWED_ORIGINS": f"http://{public_ip},https://{public_ip}",
-    "CASHIER_BASE_URL": f"http://{public_ip}/customer/pay",
+    "CASHIER_BASE_URL": f"http://{public_ip}/merchant/pay",
 }
 seen = set()
 lines = []
@@ -90,6 +90,6 @@ rm -f "${ARCHIVE}"
 echo ""
 echo "Remote install finished."
 echo "  Ops portal:      http://${PUBLIC_IP}/"
-echo "  Customer portal: http://${PUBLIC_IP}/customer/"
+echo "  Merchant portal: http://${PUBLIC_IP}/merchant/"
 echo "  API docs:        http://${PUBLIC_IP}/api/docs/"
 systemctl status capitalpay --no-pager || true

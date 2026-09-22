@@ -150,22 +150,22 @@ fi
 
 if [[ "${SKIP_BUILD}" == "1" ]]; then
   echo "==> SKIP_BUILD=1: skipping frontend build, publishing existing dist if present"
-  sudo mkdir -p "${WWW_DIR}/client" "${WWW_DIR}/customer"
+  sudo mkdir -p "${WWW_DIR}/client" "${WWW_DIR}/merchant"
   if [[ -d frontend/client_portal/dist ]]; then
     sudo rsync -a --delete frontend/client_portal/dist/ "${WWW_DIR}/client/"
   fi
-  if [[ -d frontend/customer_portal/dist ]]; then
-    sudo rsync -a --delete frontend/customer_portal/dist/ "${WWW_DIR}/customer/"
+  if [[ -d frontend/merchant_portal/dist ]]; then
+    sudo rsync -a --delete frontend/merchant_portal/dist/ "${WWW_DIR}/merchant/"
   fi
 else
   echo "==> Build frontends"
   (cd frontend/client_portal && npm ci && npm run build)
-  (cd frontend/customer_portal && VITE_BASE=/customer/ npm ci && npm run build)
+  (cd frontend/merchant_portal && VITE_BASE=/merchant/ npm ci && npm run build)
 
   echo "==> Publish static sites"
-  sudo mkdir -p "${WWW_DIR}/client" "${WWW_DIR}/customer"
+  sudo mkdir -p "${WWW_DIR}/client" "${WWW_DIR}/merchant"
   sudo rsync -a --delete frontend/client_portal/dist/ "${WWW_DIR}/client/"
-  sudo rsync -a --delete frontend/customer_portal/dist/ "${WWW_DIR}/customer/"
+  sudo rsync -a --delete frontend/merchant_portal/dist/ "${WWW_DIR}/merchant/"
 fi
 
 echo "==> Permissions for www-data (media + static)"
@@ -195,6 +195,6 @@ sudo systemctl reload nginx
 echo ""
 echo "Deploy finished."
 echo "  Ops portal:      http://<your public IP>/"
-echo "  Customer portal: http://<your public IP>/customer/"
+echo "  Merchant portal: http://<your public IP>/merchant/"
 echo "  API docs:        http://<your public IP>/api/docs/"
 echo "Check: sudo systemctl status capitalpay --no-pager"

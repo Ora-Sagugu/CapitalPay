@@ -68,8 +68,9 @@ class PaymentConfirmService:
 
         # ── 规则 3: 金额 + 时间窗口模糊匹配 ──
         bank_time = bank_statement_line["txn_time"]
+        from django.db.models import Q
+
         candidates = PaymentOrder.objects.filter(
-            amount=bank_amount,
             status__in=[
                 PaymentOrder.OrderStatus.PRE_CREATE,
                 PaymentOrder.OrderStatus.PENDING_PAY,
@@ -77,6 +78,9 @@ class PaymentConfirmService:
             pay_method=PaymentOrder.PayMethod.WIRE_TRANSFER,
             created_at__gte=bank_time - timezone.timedelta(hours=24),
             created_at__lte=bank_time + timezone.timedelta(hours=1),
+        ).filter(
+            Q(sender_total_amount=bank_amount)
+            | (Q(sender_total_amount__lte=0) & Q(amount=bank_amount))
         ).order_by("created_at")
 
         if candidates.exists():
@@ -102,7 +106,10 @@ class PaymentConfirmService:
         }:
             raise BusinessException(ErrorCode.ORDER_STATUS_INVALID)
 
-        return self._confirm_payment(order, {"txn_id": bank_txn_id or "", "amount": order.amount})
+        return self._confirm_payment(
+            order,
+            {"txn_id": bank_txn_id or "", "amount": order.expected_collection_amount()},
+        )
 
     def manual_confirm_by_order_no(self, order_no: str, bank_txn_id: str = None, user_id: str = None) -> PaymentOrder:
         order = PaymentOrder.objects.filter(order_no=order_no, is_deleted=False).first()
@@ -128,7 +135,9 @@ class PaymentConfirmService:
         - 金额一致 → PAY_RECEIVED，创建交易记录
         - 通知 Payment Received (Status: CONFIRMED)
         """
-        order = PaymentOrder.objects.select_for_update().select_related("merchant").get(pk=order.pk)
+        order = PaymentOrder.objects.select_for_update().select_related(
+            "merchant", "agent", "agent_customer",
+        ).get(pk=order.pk)
 
         # 待审核订单绝不能通过银行匹配绕过运营审核。
         confirmable = {
@@ -138,17 +147,19 @@ class PaymentConfirmService:
         if order.status not in confirmable:
             raise BusinessException(ErrorCode.ORDER_STATUS_INVALID)
 
-        from .remittance_policy import RemittanceEligibilityPolicy
+        from .remittance_policy import AgentRemittanceEligibilityPolicy, RemittanceEligibilityPolicy
         RemittanceEligibilityPolicy.assert_can_continue_existing(order.merchant)
+        AgentRemittanceEligibilityPolicy.assert_can_continue_existing(order.agent)
 
         bank_txn_id = bank_info.get("txn_id", "")
-        bank_amount = bank_info.get("amount", order.amount)
+        expected = order.expected_collection_amount()
+        bank_amount = bank_info.get("amount", expected)
 
-        # 金额校验
-        if Decimal(str(bank_amount)) != order.amount:
+        # 金额校验 — 银行入账须等于汇款方应付总额（本金 + 汇款方承担手续费）
+        if Decimal(str(bank_amount)) != expected:
             raise BusinessException(
                 ErrorCode.ORDER_AMOUNT_MISMATCH,
-                f"The bank amount {bank_amount} does not match the instruction amount {order.amount}",
+                f"The bank amount {bank_amount} does not match the instruction amount {expected}",
             )
 
         now = timezone.now()
@@ -200,7 +211,15 @@ class PaymentConfirmService:
         from apps.account.services import AccountService
 
         svc = AccountService()
-        va = svc.merchant_va_for_currency(order.merchant, self._collection_currency(order))
+        currency = self._collection_currency(order)
+        if order.agent_id:
+            from apps.account.models import NostroAccount
+            from apps.agent.services import ensure_agent_accounts, get_agent_ledger_va
+
+            ensure_agent_accounts(order.agent, currency)
+            va = get_agent_ledger_va(order.agent, NostroAccount.AccountType.CURRENT, currency)
+        else:
+            va = svc.merchant_va_for_currency(order.merchant, currency)
         if not va:
             return
         svc.post_va_entry(
@@ -221,7 +240,7 @@ class PaymentConfirmService:
         fee = order.fee_amount
         if not fee or fee <= 0:
             return
-        agent = getattr(order.merchant, "agent", None)
+        agent = order.agent or None
         if agent:
             from apps.account.models import NostroAccount, VaLedgerEntry
             from apps.account.services import AccountService
@@ -242,7 +261,7 @@ class PaymentConfirmService:
                 )
         order.add_status_history("FEES_CREDITED", {
             "fee_amount": str(fee),
-            "merchant": order.merchant.merchant_no,
+            "merchant": order.party_no,
             "note": "Charges have been posted to the institution account",
         })
         order.save(update_fields=["status_history", "updated_at"])
@@ -260,7 +279,7 @@ class PaymentConfirmService:
         )
         MoneyMovementService().record(
             movement_type=MoneyMovement.MovementType.COLLECTION,
-            amount=order.amount,
+            amount=order.expected_collection_amount(),
             currency=currency,
             source_type="PAYMENT",
             source_id=str(order.id),
@@ -269,8 +288,8 @@ class PaymentConfirmService:
             occurred_at=order.pay_received_at,
             from_party_type="PAYER",
             from_party_id=order.user_id or "",
-            to_party_type="MERCHANT",
-            to_party_id=str(order.merchant_id or ""),
+            to_party_type="AGENT" if order.agent_id else "MERCHANT",
+            to_party_id=str(order.agent_id or order.merchant_id or ""),
             bank_code=order.bank_code or "",
             bank_txn_id=bank_txn_id or "",
             payment_order=order,

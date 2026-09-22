@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url'
 
 const clientDir = path.dirname(fileURLToPath(import.meta.url))
 const repoRoot = path.resolve(clientDir, '..', '..')
-const customerDir = path.resolve(repoRoot, 'frontend', 'customer_portal')
+const merchantDir = path.resolve(repoRoot, 'frontend', 'merchant_portal')
 const python = process.env.E2E_PYTHON || path.resolve(
   repoRoot,
   '.venv',
@@ -39,7 +39,7 @@ export default defineConfig({
     },
     {
       command: 'npm run dev -- --host 127.0.0.1 --port 1030 --strictPort',
-      cwd: customerDir,
+      cwd: merchantDir,
       url: 'http://127.0.0.1:1030/login',
       env: { VITE_API_TARGET: 'http://127.0.0.1:1028' },
       reuseExistingServer: false,

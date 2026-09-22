@@ -26,6 +26,17 @@ def generate_agent_no():
     raise RuntimeError("Failed to generate a unique agent code")
 
 
+def generate_customer_no():
+    """Generate a unique AgentCustomer number."""
+    from apps.agent.models import AgentCustomer
+
+    for _ in range(_AGENT_NO_MAX_ATTEMPTS):
+        code = f"AC{dt.now().strftime('%Y%m%d')}{uuid.uuid4().hex[:6].upper()}"
+        if not AgentCustomer.objects.filter(customer_no=code).exists():
+            return code
+    raise RuntimeError("Failed to generate a unique customer number")
+
+
 def generate_commission_no():
     """生成佣金单号 CM + 时间戳 + 随机数"""
     now = dt.now()
@@ -154,7 +165,7 @@ def build_agent_fee_overview(agent: Agent, recent_limit: int = 20) -> dict:
         output_field=CharField(),
     )
 
-    orders = PaymentOrder.objects.filter(merchant__agent_id=agent.id, is_deleted=False)
+    orders = PaymentOrder.objects.filter(agent_id=agent.id, is_deleted=False)
     order_rows = (
         orders.annotate(ccy=currency_expr)
         .values("ccy")
@@ -209,7 +220,7 @@ def build_agent_fee_overview(agent: Agent, recent_limit: int = 20) -> dict:
         recent_orders.append({
             "id": str(order.id),
             "order_no": order.order_no,
-            "customer_name": order.merchant.merchant_name if order.merchant else "",
+            "customer_name": order.party_name,
             "currency": order.from_currency or order.currency,
             "amount": _money_str(order.amount),
             "fee_amount": _money_str(order.fee_amount),
@@ -224,7 +235,7 @@ def build_agent_fee_overview(agent: Agent, recent_limit: int = 20) -> dict:
         "agent_name": agent.agent_name,
         "status": agent.status,
         "commission_rate": format(Decimal(str(agent.commission_rate or 0)), "f"),
-        "customer_count": agent.direct_merchants.filter(is_deleted=False).count(),
+        "customer_count": agent.customers.filter(is_deleted=False).count(),
         "order_count": orders.count(),
         "currency_count": len(by_currency),
         "by_currency": by_currency,

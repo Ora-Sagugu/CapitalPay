@@ -273,9 +273,7 @@ class OperationLogViewSet(RequiresFeature, viewsets.ReadOnlyModelViewSet):
     """操作日志查询 — 只读。"""
     authentication_classes = [JWTAuthentication]
     permission_classes = [permissions.IsAuthenticated]
-    feature_code = "feature:users"
-    queryset = OperationLog.objects.all().select_related("user")
-    serializer_class = OperationLogSerializer
+    feature_code = "feature:audit_logs"
 
     def get_queryset(self):
         qs = super().get_queryset()

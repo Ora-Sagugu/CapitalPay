@@ -22,9 +22,9 @@ Push-Location frontend\client_portal
 npm ci
 npm run build
 Pop-Location
-Push-Location frontend\customer_portal
+Push-Location frontend\merchant_portal
 npm ci
-$env:VITE_BASE = "/customer/"
+$env:VITE_BASE = "/merchant/"
 npm run build
 Pop-Location
 
@@ -55,5 +55,5 @@ finally {
 Write-Host ""
 Write-Host "Deploy finished. Open:"
 Write-Host "  http://${HostName}/"
-Write-Host "  http://${HostName}/customer/"
+Write-Host "  http://${HostName}/merchant/"
 Write-Host "  http://${HostName}/api/docs/"

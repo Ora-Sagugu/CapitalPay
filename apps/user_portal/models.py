@@ -7,9 +7,9 @@ from apps.core.models import BaseModel
 
 
 class EndUser(BaseModel):
-    """终端用户 — CapitalPay 面向的付款方（C端用户）。
+    """终端用户 — Agent / Merchant 门户账号。
 
-    用户可以通过邮箱/手机号注册，绑定银行账户，发起支付。
+    用户可以通过邮箱/手机号注册，绑定银行账户；Merchant 可发起汇款。
     """
     username = models.CharField(max_length=64, unique=True, default="", verbose_name="用户名")
     password_hash = models.CharField(max_length=256, verbose_name="密码哈希")
@@ -54,7 +54,7 @@ class EndUser(BaseModel):
         max_length=16,
         choices=[
             ("none", "未选择"),
-            ("customer", "客户"),
+            ("merchant", "商户"),
             ("agent", "代理"),
         ],
         default="none",
@@ -132,6 +132,10 @@ class UserOnboarding(BaseModel):
     license_image = models.TextField(blank=True, verbose_name="营业执照图片")
     id_front_image = models.TextField(blank=True, verbose_name="法人证件正面")
     id_back_image = models.TextField(blank=True, verbose_name="法人证件背面")
+
+    # ── Merchant KYB 扩展（CapitalPay Onboarding Form）──
+    application_ref = models.CharField(max_length=64, blank=True, verbose_name="申请编号")
+    kyb_payload = models.JSONField(default=dict, blank=True, verbose_name="KYB完整资料")
 
     class Meta:
         db_table = "user_onboarding"

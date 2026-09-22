@@ -3,14 +3,15 @@
     <PageHeader title="Users" subtitle="Operations and end-user accounts" />
     <div class="page-card">
       <el-tabs v-model="tab" @tab-change="reload">
-        <el-tab-pane label="Operations" name="ops" />
-        <el-tab-pane label="End users" name="end" />
+        <el-tab-pane v-if="canManageUsers" label="Operations" name="ops" />
+        <el-tab-pane v-if="canManageUsers" label="End users" name="end" />
+        <el-tab-pane v-if="canViewLogs && !canManageUsers" label="Audit log" name="logsOnly" />
       </el-tabs>
-      <el-tabs v-if="tab === 'ops'" v-model="opsTab" type="card" @tab-change="reload">
+      <el-tabs v-if="tab === 'ops' && canManageUsers" v-model="opsTab" type="card" @tab-change="reload">
         <el-tab-pane label="Account list" name="opsUsers" />
-        <el-tab-pane label="Audit log" name="logs" />
+        <el-tab-pane v-if="canViewLogs" label="Audit log" name="logs" />
       </el-tabs>
-      <el-tabs v-else v-model="endTab" type="card" @tab-change="reload">
+      <el-tabs v-else-if="tab === 'end' && canManageUsers" v-model="endTab" type="card" @tab-change="reload">
         <el-tab-pane label="User list" name="endUsers" />
         <el-tab-pane label="Bank accounts" name="accounts" />
         <el-tab-pane label="Payment records" name="payments" />
@@ -25,7 +26,7 @@
           @keyup.enter="reload"
         />
         <el-button @click="reload">Refresh</el-button>
-        <el-button v-if="activeView === 'opsUsers'" type="primary" @click="openCreate">+ New user</el-button>
+        <el-button v-if="activeView === 'opsUsers' && canManageUsers" type="primary" @click="openCreate">+ New user</el-button>
       </div>
       <el-table v-if="activeView === 'opsUsers'" :data="rows" v-loading="loading">
         <el-table-column prop="username" label="Username" min-width="120" />
@@ -182,11 +183,19 @@ import {
 } from '@/api/rbac'
 import { getUserAccounts, getUserPayments } from '@/api/userPortal'
 import { datetime, money, unwrapList, PAY_METHOD, ROLE_NAME } from '@/utils/format'
+import { useAuthStore } from '@/store/auth'
+
+const auth = useAuthStore()
+const canManageUsers = computed(() => auth.hasPermission('feature:users'))
+const canViewLogs = computed(() => auth.hasPermission('feature:audit_logs'))
 
 const tab = ref('ops')
 const opsTab = ref('opsUsers')
 const endTab = ref('endUsers')
-const activeView = computed(() => tab.value === 'ops' ? opsTab.value : endTab.value)
+const activeView = computed(() => {
+  if (tab.value === 'logsOnly') return 'logs'
+  return tab.value === 'ops' ? opsTab.value : endTab.value
+})
 const searchable = computed(() => ['opsUsers', 'logs', 'endUsers'].includes(activeView.value))
 const searchPlaceholder = computed(() => activeView.value === 'logs' ? 'Operator username' : 'Name / username')
 const rows = ref([])
@@ -323,9 +332,11 @@ function logDetail(detail) {
 }
 
 onMounted(async () => {
-  const r = await getRoles({ page_size: 50 })
-  const allowed = new Set(['super_admin', 'maker', 'checker', 'authoriser'])
-  roles.value = unwrapList(r).rows.filter((item) => allowed.has(item.code))
+  if (!canManageUsers.value && canViewLogs.value) {
+    tab.value = 'logsOnly'
+  }
+  const r = await getRoles({ page_size: 100 })
+  roles.value = unwrapList(r).rows
   load()
 })
 </script>

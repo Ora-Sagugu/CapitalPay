@@ -22,6 +22,12 @@ class BankChannel(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     bank_code = models.CharField("银行代码", max_length=20, unique=True)
     bank_name = models.CharField("银行名称", max_length=100)
+    account_number = models.CharField(
+        "银行账号",
+        max_length=64,
+        unique=True,
+        help_text="银行账户号码：通常为纯数字；国际账号（如 IBAN）可含字母",
+    )
     channel_type = models.CharField("通道类型", max_length=20, choices=ChannelType.choices, default=ChannelType.ONLINE)
     status = models.CharField("状态", max_length=20, choices=Status.choices, default=Status.ACTIVE)
     priority = models.IntegerField("优先级", default=100, validators=[MinValueValidator(1), MaxValueValidator(999)])
@@ -32,12 +38,10 @@ class BankChannel(models.Model):
     min_fee = models.DecimalField("最低手续费", max_digits=12, decimal_places=2, default=1.00)
     max_fee = models.DecimalField("最高手续费", max_digits=12, decimal_places=2, default=500.00)
     country = models.CharField("国家", max_length=50, blank=True, default="")
-    usd_balance = models.DecimalField("USD余额", max_digits=18, decimal_places=2, default=0)
-    hkd_balance = models.DecimalField("HKD余额", max_digits=18, decimal_places=2, default=0)
-    cny_balance = models.DecimalField("CNY余额", max_digits=18, decimal_places=2, default=0)
+    currency = models.CharField("币种", max_length=3, default="USD")
+    balance = models.DecimalField("余额", max_digits=18, decimal_places=2, default=0)
     api_endpoint = models.URLField("API端点", blank=True)
     health_check_url = models.URLField("健康检查URL", blank=True)
-    supported_currencies = models.JSONField("支持币种", default=list)
     supported_countries = models.JSONField("支持国家", default=list)
     remark = models.TextField("备注", blank=True)
     created_at = models.DateTimeField("创建时间", auto_now_add=True)

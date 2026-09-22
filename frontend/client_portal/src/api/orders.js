@@ -23,6 +23,9 @@ export function confirmPayment(orderNo, data = {}) {
 export function confirmTransfer(orderNo, data = {}) {
   return request.post(`/v1/admin/orders/${orderNo}/confirm-transfer/`, data)
 }
+export function getPendingTransfers(params) {
+  return request.get('/v1/admin/orders/pending-transfers/', { params })
+}
 export function getPayoutBanks(orderNo) {
   return request.get(`/v1/admin/orders/${orderNo}/payout-banks/`)
 }

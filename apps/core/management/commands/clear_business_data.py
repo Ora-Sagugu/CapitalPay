@@ -1,4 +1,9 @@
-"""Clear all business data except OFAC/UN SanctionList.
+"""Clear demo / test business data.
+
+Keeps:
+  - SanctionList (OFAC/UN)
+  - BankChannel + RoutingRule (ops Channels)
+  - Ops portal accounts (SystemUser / Role / Permission)
 
 Usage:
     python manage.py clear_business_data
@@ -9,10 +14,15 @@ from django.core.management.base import BaseCommand
 
 from apps.compliance.models import SanctionList
 from apps.core.data_wipe import wipe_business_data
+from apps.rbac.models import SystemUser
+from apps.routing.models import BankChannel, RoutingRule
 
 
 class Command(BaseCommand):
-    help = "Wipe business/demo data; keep only SanctionList (OFAC/UN). Does not re-seed."
+    help = (
+        "Wipe demo/test data; keep SanctionList, Channels (BankChannel/RoutingRule), "
+        "and ops SystemUser accounts. Does not re-seed."
+    )
 
     def add_arguments(self, parser):
         parser.add_argument(
@@ -22,12 +32,17 @@ class Command(BaseCommand):
         )
 
     def handle(self, *args, **options):
-        kept = SanctionList.objects.count()
+        sanctions = SanctionList.objects.count()
+        channels = BankChannel.objects.count()
+        routes = RoutingRule.objects.count()
+        ops_users = SystemUser.objects.count()
         if not options["yes"]:
             self.stdout.write(
                 self.style.WARNING(
-                    f"This will delete all business data and keep only SanctionList "
-                    f"({kept} rows). Sessions/admin log/auth.User will also be cleared."
+                    "This will delete merchants, agents, portal users, orders, wallets, "
+                    "and other test data.\n"
+                    f"Preserved: SanctionList={sanctions}, BankChannel={channels}, "
+                    f"RoutingRule={routes}, SystemUser={ops_users}."
                 )
             )
             confirm = input("Type 'yes' to continue: ").strip().lower()
@@ -35,9 +50,23 @@ class Command(BaseCommand):
                 self.stdout.write("Aborted.")
                 return
 
-        self.stdout.write(self.style.WARNING("Wiping business data (SanctionList only)..."))
-        wipe_business_data(keep_risk_rating_limits=False, clear_framework_ephemera=True)
-        remaining = SanctionList.objects.count()
         self.stdout.write(
-            self.style.SUCCESS(f"Done. SanctionList preserved: {remaining} rows. No seed applied.")
+            self.style.WARNING(
+                "Wiping test data (keep Channels, Sanctions, ops accounts)..."
+            )
+        )
+        wipe_business_data(
+            keep_risk_rating_limits=False,
+            keep_channels=True,
+            keep_ops_accounts=True,
+            clear_framework_ephemera=True,
+        )
+        self.stdout.write(
+            self.style.SUCCESS(
+                "Done. Preserved — "
+                f"SanctionList={SanctionList.objects.count()}, "
+                f"BankChannel={BankChannel.objects.count()}, "
+                f"RoutingRule={RoutingRule.objects.count()}, "
+                f"SystemUser={SystemUser.objects.count()}. No seed applied."
+            )
         )

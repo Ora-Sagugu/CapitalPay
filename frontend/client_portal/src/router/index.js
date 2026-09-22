@@ -21,6 +21,7 @@ const routes = [
       { path: 'remittance-fees', name: 'remittance-fees', component: () => import('@/views/RemittanceFees.vue'), meta: { title: 'Remittance Fee', titleKey: 'menu.remittanceFees', permission: 'feature:remittance_fees' } },
       { path: 'kyc', redirect: { path: '/merchants', query: { tab: 'kyc' } } },
       { path: 'merchants', name: 'merchants', component: () => import('@/views/Merchants.vue'), meta: { title: 'Profiles', titleKey: 'menu.merchants', permission: 'feature:merchants' } },
+      { path: 'customers', name: 'customers', component: () => import('@/views/Customers.vue'), meta: { title: 'Customers', titleKey: 'menu.customers', permission: 'feature:customers' } },
       { path: 'accounts', name: 'accounts', component: () => import('@/views/Accounts.vue'), meta: { title: 'Master Account', titleKey: 'menu.accounts', permission: 'feature:accounts' } },
       { path: 'virtual-accounts', name: 'virtual-accounts', component: () => import('@/views/VirtualAccounts.vue'), meta: { title: 'Virtual Accounts', titleKey: 'menu.virtualAccounts', permission: 'feature:virtual_accounts' } },
       { path: 'deposits', name: 'deposits', component: () => import('@/views/Deposits.vue'), meta: { title: 'Deposits', titleKey: 'menu.deposits', permission: 'feature:deposits' } },

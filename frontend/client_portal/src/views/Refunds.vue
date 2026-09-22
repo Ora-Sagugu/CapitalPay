@@ -20,7 +20,7 @@
       <el-table :data="rows" v-loading="loading">
         <el-table-column prop="refund_no" label="Refund no." min-width="160" />
         <el-table-column prop="order_no" label="Order No." min-width="160" />
-        <el-table-column prop="merchant_name" label="Customer" min-width="130" />
+        <el-table-column prop="merchant_name" label="Merchant" min-width="130" />
         <el-table-column prop="refund_amount" label="Amount" min-width="100" :formatter="formatMoneyCell" />
         <el-table-column prop="refund_fee_amount" label="Charges" min-width="90" :formatter="formatMoneyCell" />
         <el-table-column prop="refund_reason" label="Reason" min-width="140" />

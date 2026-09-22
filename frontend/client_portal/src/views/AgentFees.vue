@@ -1,6 +1,6 @@
 <template>
   <div>
-    <PageHeader title="Agent Fee" subtitle="Share of customer transaction fees, by agent" />
+    <PageHeader title="Agent Fee" subtitle="Share of remittance profit after Bank Fee, by agent" />
     <KpiCards :items="kpis" />
     <div class="page-card">
       <div class="toolbar">
@@ -18,7 +18,7 @@
         <el-table-column label="Share" width="110">
           <template #default="{ row }">{{ formatShare(row.commission_rate) }}</template>
         </el-table-column>
-        <el-table-column prop="customer_count" label="Customers" width="110" />
+        <el-table-column prop="customer_count" label="Merchants" width="110" />
         <el-table-column prop="order_count" label="Orders" width="100" />
         <el-table-column label="Status" width="100">
           <template #default="{ row }"><StatusPill kind="agent" :value="row.status" /></template>
@@ -81,7 +81,7 @@ const kpis = computed(() => {
   return [
     { label: 'Agents', value: list.length },
     { label: 'Average share', value: `${avg.toFixed(1)}%` },
-    { label: 'Customers', value: list.reduce((sum, row) => sum + Number(row.customer_count || 0), 0) },
+    { label: 'Merchants', value: list.reduce((sum, row) => sum + Number(row.customer_count || 0), 0) },
     { label: 'Orders', value: list.reduce((sum, row) => sum + Number(row.order_count || 0), 0) },
   ]
 })

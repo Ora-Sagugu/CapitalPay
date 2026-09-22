@@ -57,7 +57,9 @@ class RemittanceQuoteService:
     def create_quote(
         self,
         *,
-        merchant,
+        merchant=None,
+        agent=None,
+        agent_customer=None,
         amount,
         from_currency: str,
         to_currency: str,
@@ -71,7 +73,20 @@ class RemittanceQuoteService:
         if fee_bearing not in {"OUR", "SHA", "BEN"}:
             raise BusinessException("FEE_BEARING_INVALID", "The charge-bearing method is invalid", 400)
 
-        RemittanceEligibilityPolicy().assert_eligible(merchant, amount)
+        if agent is not None:
+            from .remittance_policy import AgentRemittanceEligibilityPolicy
+            AgentRemittanceEligibilityPolicy().assert_eligible(agent, agent_customer, amount)
+            book_key = agent.agent_no
+        else:
+            if merchant is None:
+                raise BusinessException("MERCHANT_REQUIRED", "A merchant is required for this quotation", 400)
+            RemittanceEligibilityPolicy().assert_eligible(
+                merchant,
+                amount,
+                customer=agent_customer,
+                require_customer=(actor_type == "CUSTOMER"),
+            )
+            book_key = merchant.merchant_no
         fee_config = RemittanceFeeConfig.get_config()
         fee = self._calculate_fee(amount, fee_config)
         exchange_rate, rate_source = self._resolve_rate(from_currency, to_currency)
@@ -100,7 +115,7 @@ class RemittanceQuoteService:
         settle_amount = _money(beneficiary_principal * exchange_rate)
 
         digest_payload = {
-            "merchant": merchant.merchant_no,
+            "merchant": book_key,
             "amount": str(amount),
             "from_currency": from_currency,
             "to_currency": to_currency,
@@ -113,6 +128,8 @@ class RemittanceQuoteService:
         return RemittanceQuote.objects.create(
             quote_no=f"RQT{timezone.now():%Y%m%d%H%M%S}{uuid.uuid4().hex[:10].upper()}",
             merchant=merchant,
+            agent=agent,
+            agent_customer=agent_customer,
             user_id=user_id,
             actor_type=actor_type,
             amount=amount,
@@ -136,10 +153,23 @@ class RemittanceQuoteService:
 
     @staticmethod
     def serialize(quote: RemittanceQuote) -> dict:
+        merchant_no = ""
+        merchant_name = ""
+        if quote.merchant_id:
+            merchant_no = quote.merchant.merchant_no
+            merchant_name = quote.merchant.merchant_name
+        elif quote.agent_customer_id:
+            merchant_no = quote.agent_customer.customer_no
+            merchant_name = quote.agent_customer.legal_name
+        elif quote.agent_id:
+            merchant_no = quote.agent.agent_no
+            merchant_name = quote.agent.agent_name
         return {
             "quote_id": quote.quote_no,
-            "merchant_no": quote.merchant.merchant_no,
-            "merchant_name": quote.merchant.merchant_name,
+            "merchant_no": merchant_no,
+            "merchant_name": merchant_name,
+            "customer_id": str(quote.agent_customer_id) if quote.agent_customer_id else "",
+            "agent_id": str(quote.agent_id) if quote.agent_id else "",
             "amount": str(quote.amount),
             "from_currency": quote.from_currency,
             "to_currency": quote.to_currency,

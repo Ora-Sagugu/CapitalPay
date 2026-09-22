@@ -29,7 +29,7 @@
       <el-table :data="rows" v-loading="loading">
         <el-table-column prop="prn_code" label="PRN" width="110" />
         <el-table-column prop="order_no" label="Order" min-width="150" show-overflow-tooltip />
-        <el-table-column prop="merchant_name" label="Customer" min-width="160" show-overflow-tooltip />
+        <el-table-column prop="merchant_name" label="Merchant" min-width="160" show-overflow-tooltip />
         <el-table-column label="Collection bank" min-width="220" show-overflow-tooltip>
           <template #default="{ row }">{{ bankLabel(row) }}</template>
         </el-table-column>
@@ -78,7 +78,7 @@
         <el-descriptions title="Matched remittance" :column="1" border style="margin-top: 16px">
           <el-descriptions-item label="PRN">{{ dash(detail.prn_code) }}</el-descriptions-item>
           <el-descriptions-item label="Order">{{ dash(detail.order_no) }}</el-descriptions-item>
-          <el-descriptions-item label="Customer">{{ customerLabel(detail) }}</el-descriptions-item>
+          <el-descriptions-item label="Merchant">{{ customerLabel(detail) }}</el-descriptions-item>
           <el-descriptions-item label="Order status">{{ dash(orderStatusLabel(detail.order_status)) }}</el-descriptions-item>
           <el-descriptions-item label="Expected amount">
             {{ detail.expected_amount ? `${money(detail.expected_amount)} ${detail.expected_currency || ''}` : '—' }}

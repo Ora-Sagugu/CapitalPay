@@ -18,6 +18,7 @@ from apps.merchant.models import Merchant
 from .functions import (
     APPROVE_BACKFILL_PAIRS,
     ASSIGNABLE_ROLE_CODES,
+    DEFAULT_ROLE_CAPABILITIES,
     FEATURE_CODES,
     FUNCTION_BY_CODE,
     LEGACY_ROLE_MAP,
@@ -33,9 +34,11 @@ from .models import SystemUser, Role, Permission, UserRole, RolePermission, Oper
 OPS_DEMO_PASSWORD = "123456"
 OPS_DEMO_USERS = (
     ("admin", "Administrator", "super_admin", "admin@capitalpay.com"),
-    ("maker", "Maker", "maker", "maker@capitalpay.com"),
-    ("checker", "Checker", "checker", "checker@capitalpay.com"),
-    ("authoriser", "Authoriser", "authoriser", "authoriser@capitalpay.com"),
+    ("ops", "Merchant Ops", "merchant_ops", "ops@capitalpay.com"),
+    ("compliance", "Compliance / Risk", "compliance", "compliance@capitalpay.com"),
+    ("finance", "Finance", "finance", "finance@capitalpay.com"),
+    ("support", "Customer Support", "support", "support@capitalpay.com"),
+    ("analyst", "Analyst / Read-only", "analyst", "analyst@capitalpay.com"),
 )
 
 
@@ -236,10 +239,11 @@ class AuthService:
         return SystemUser.objects.get(username=OPS_BUILTIN_USERNAME)
 
     def ensure_ops_rbac(self) -> dict:
-        """Idempotent catalog: 4 roles, feature permissions, demo accounts."""
+        """Idempotent catalog: functional roles, feature permissions, demo accounts."""
         self._ensure_feature_permissions()
         self._ensure_system_roles()
         self._migrate_legacy_roles()
+        self._ensure_default_role_capabilities()
         users = {}
         for username, real_name, role_code, email in OPS_DEMO_USERS:
             users[username] = self._ensure_demo_user(
@@ -372,6 +376,22 @@ class AuthService:
                 ur.save(update_fields=["is_deleted"])
 
         Role.objects.filter(code__in=RETIRED_ROLE_CODES, is_deleted=False).update(is_deleted=True)
+
+    def _ensure_default_role_capabilities(self):
+        """Seed CSV defaults only when an assignable role has no active grants."""
+        for role_code, capability_codes in DEFAULT_ROLE_CAPABILITIES.items():
+            role = Role.objects.filter(code=role_code, is_deleted=False).first()
+            if not role:
+                continue
+            has_grants = RolePermission.objects.filter(
+                role=role,
+                is_deleted=False,
+                permission__code__in=FEATURE_CODES,
+                permission__is_deleted=False,
+            ).exists()
+            if has_grants:
+                continue
+            self.set_role_capabilities(role, list(capability_codes))
 
     def _ensure_demo_user(self, *, username: str, real_name: str, role_code: str, email: str):
         user = SystemUser.objects.filter(username=username).first()
@@ -514,10 +534,16 @@ class AuthService:
         return grouped
 
     def list_role_matrix(self) -> dict:
-        role_caps: dict[str, list[str]] = {code: [] for code in ASSIGNABLE_ROLE_CODES}
+        custom_roles = list(
+            Role.objects.filter(is_system=False, is_deleted=False)
+            .exclude(code__in=RETIRED_ROLE_CODES)
+            .order_by("created_at", "name")
+        )
+        assignable_codes = list(ASSIGNABLE_ROLE_CODES) + [role.code for role in custom_roles]
+        role_caps: dict[str, list[str]] = {code: [] for code in assignable_codes}
         rows = RolePermission.objects.filter(
             is_deleted=False,
-            role__code__in=ASSIGNABLE_ROLE_CODES,
+            role__code__in=assignable_codes,
             role__is_deleted=False,
             permission__code__in=FEATURE_CODES,
             permission__is_deleted=False,
@@ -544,10 +570,21 @@ class AuthService:
                 "capability_codes": codes,
                 "capability_count": len(codes),
             })
+        for role in custom_roles:
+            codes = list(role_caps.get(role.code, []))
+            roles.append({
+                "id": str(role.id),
+                "code": role.code,
+                "name": role.name,
+                "description": role.description,
+                "locked": False,
+                "capability_codes": codes,
+                "capability_count": len(codes),
+            })
         return {
             "roles": roles,
             "groups": self.list_capability_groups(),
-            "assignable_roles": list(ASSIGNABLE_ROLE_CODES),
+            "assignable_roles": assignable_codes,
         }
 
     def list_functions(self) -> list[dict]:
@@ -590,7 +627,7 @@ class AuthService:
                 "Super Admin always has every business and cannot be changed",
                 400,
             )
-        if role.code not in ASSIGNABLE_ROLE_CODES:
+        if not self._can_edit_role_capabilities(role):
             raise BusinessException(
                 "ROLE_NOT_ASSIGNABLE",
                 f"Capabilities cannot be assigned to role {role.code}",
@@ -610,6 +647,13 @@ class AuthService:
                 rp.is_deleted = True
                 rp.save(update_fields=["is_deleted"])
         return sorted(wanted)
+
+    def _can_edit_role_capabilities(self, role: Role) -> bool:
+        if role.is_deleted or role.code in RETIRED_ROLE_CODES:
+            return False
+        if role.code in ASSIGNABLE_ROLE_CODES:
+            return True
+        return not role.is_system
 
     def set_function_roles(self, feature_code: str, role_codes: list[str]) -> list[str]:
         spec = FUNCTION_BY_CODE.get(feature_code)

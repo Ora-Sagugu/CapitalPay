@@ -104,6 +104,24 @@ def create_eligible_merchant(
     )
 
 
+def create_approved_customer(merchant, legal_name="Alpha Customer"):
+    from apps.agent.models import AgentCustomer
+
+    return AgentCustomer.objects.create(
+        merchant=merchant,
+        agent=None,
+        legal_name=legal_name,
+        contact_name="Pat",
+        contact_phone="13900000999",
+        contact_email="customer@example.com",
+        kyc_status=AgentCustomer.KycStatus.APPROVED,
+        bank_name="Equity",
+        account_name=legal_name,
+        bank_account="001122",
+        swift_code="EQBLKENA",
+    )
+
+
 def submit_payload(quote):
     return {
         "quote_id": quote.quote_no,
@@ -227,6 +245,16 @@ class RemittanceEligibilityAndQuoteTests(TestCase):
         decision = RemittanceEligibilityPolicy().evaluate(merchant, Decimal("1000"))
         self.assertTrue(decision.eligible)
 
+    def test_eligibility_does_not_require_settlement_account(self):
+        merchant = create_eligible_merchant("NOSETTLE")
+        MerchantSettlementAccount.objects.filter(merchant=merchant).update(is_deleted=True)
+        decision = RemittanceEligibilityPolicy().evaluate(merchant, Decimal("1000"))
+        self.assertTrue(decision.eligible)
+        self.assertNotIn(
+            "SETTLEMENT_ACCOUNT_REQUIRED",
+            [blocker.code for blocker in decision.blockers],
+        )
+
     def test_quote_ignores_customer_tariff_and_uses_global_fee(self):
         merchant = create_eligible_merchant("CUSTFEE", with_merchant_fee=True)
         quote = RemittanceQuoteService().create_quote(
@@ -257,10 +285,12 @@ class RemittanceEligibilityAndQuoteTests(TestCase):
 class RemittanceApplicationTests(TestCase):
     def setUp(self):
         self.merchant = create_eligible_merchant("02", daily_limit=Decimal("1500"))
+        self.customer = create_approved_customer(self.merchant)
 
     def quote(self, amount="1000", actor_type="CUSTOMER", user_id="user-1"):
         return RemittanceQuoteService().create_quote(
             merchant=self.merchant,
+            agent_customer=self.customer if actor_type == "CUSTOMER" else None,
             amount=amount,
             from_currency="USD",
             to_currency="USD",
@@ -275,6 +305,7 @@ class RemittanceApplicationTests(TestCase):
         service = RemittanceApplicationService()
         order, created = service.submit(
             merchant=self.merchant,
+            agent_customer=self.customer,
             payload=payload,
             idempotency_key="idem-same",
             user_id="user-1",
@@ -282,6 +313,7 @@ class RemittanceApplicationTests(TestCase):
         )
         retry, retry_created = service.submit(
             merchant=self.merchant,
+            agent_customer=self.customer,
             payload=payload,
             idempotency_key="idem-same",
             user_id="user-1",
@@ -308,6 +340,7 @@ class RemittanceApplicationTests(TestCase):
         service = RemittanceApplicationService()
         service.submit(
             merchant=self.merchant,
+            agent_customer=self.customer,
             payload=payload,
             idempotency_key="idem-conflict",
             user_id="user-1",
@@ -317,6 +350,7 @@ class RemittanceApplicationTests(TestCase):
         with self.assertRaises(BusinessException) as caught:
             service.submit(
                 merchant=self.merchant,
+                agent_customer=self.customer,
                 payload=changed,
                 idempotency_key="idem-conflict",
                 user_id="user-1",
@@ -328,6 +362,7 @@ class RemittanceApplicationTests(TestCase):
         quote = self.quote("1000")
         RemittanceApplicationService().submit(
             merchant=self.merchant,
+            agent_customer=self.customer,
             payload=submit_payload(quote),
             idempotency_key="idem-limit-1",
             user_id="user-1",
@@ -347,6 +382,7 @@ class RemittanceApplicationTests(TestCase):
             with self.assertRaises(RuntimeError):
                 RemittanceApplicationService().submit(
                     merchant=self.merchant,
+                    agent_customer=self.customer,
                     payload=submit_payload(quote),
                     idempotency_key="idem-rollback",
                     user_id="user-1",
@@ -370,6 +406,7 @@ class RemittanceApplicationTests(TestCase):
             with self.assertRaises(BusinessException) as caught:
                 RemittanceApplicationService().submit(
                     merchant=self.merchant,
+                    agent_customer=self.customer,
                     payload=submit_payload(quote),
                     idempotency_key="idem-sanction",
                     user_id="user-1",

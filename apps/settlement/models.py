@@ -25,7 +25,12 @@ class SettlementBatch(BaseModel):
     batch_no = models.CharField(max_length=32, unique=True, verbose_name="清算批次号")
     settle_date = models.DateField(db_index=True, verbose_name="清算日期")
     merchant = models.ForeignKey(
-        "merchant.Merchant", on_delete=models.PROTECT, related_name="settlement_batches", verbose_name="商户"
+        "merchant.Merchant", on_delete=models.PROTECT, related_name="settlement_batches",
+        verbose_name="商户", null=True, blank=True,
+    )
+    agent = models.ForeignKey(
+        "agent.Agent", on_delete=models.PROTECT, related_name="settlement_batches",
+        verbose_name="代理商", null=True, blank=True,
     )
     # ── 汇总统计 ──
     total_count = models.IntegerField(default=0, verbose_name="订单总笔数")
@@ -58,6 +63,7 @@ class SettlementBatch(BaseModel):
             models.Index(fields=["merchant", "settle_date"]),
             models.Index(fields=["status", "settle_date"]),
             models.Index(fields=["merchant", "settle_date", "currency"]),
+            models.Index(fields=["agent", "settle_date"]),
         ]
 
 
@@ -86,9 +92,11 @@ class FeeShare(BaseModel):
 
     功能清单对应: 手续费分润管理
     分账公式:
-        agent_fee = total_fee * commission_rate（客户手续费分成）
-        platform_fee = total_fee - agent_fee（手续费余下归平台）
-        channel_fee = 渠道手续费（银行成本，不参与代理分成）
+        channel_fee / Bank Fee = 银行 Fee Rule 费用（从 Remittance Fee 中扣取）
+        Bank Fee 必须严格小于 Remittance Fee
+        net_profit = remittance_fee - channel_fee（每笔订单赚的钱）
+        agent_fee = max(net_profit, 0) * Agent Fee Share
+        platform_fee = net_profit - agent_fee
     """
 
     settlement_detail = models.OneToOneField(

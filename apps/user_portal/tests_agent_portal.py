@@ -119,10 +119,10 @@ class AgentPortalApiTests(TestCase):
         self.assertTrue(all(row["merchant_name"] == "Alpha Co" for row in res.data["items"]))
         self.assertTrue(all(row["merchant_name"] == "Alpha Co" for row in res.data["by_customer"]))
 
-    def test_customer_cannot_read_agent_workspace(self):
+    def test_merchant_cannot_read_agent_workspace(self):
         self.svc.register(phone="13900000062", password="Test@123", sms_code="")
         customer = EndUser.objects.get(phone="13900000062")
-        self.svc.choose_role(customer, "customer")
+        self.svc.choose_role(customer, "merchant")
         token = UserService._generate_token(str(customer.id), user_type="user")
         client = APIClient()
         client.credentials(HTTP_AUTHORIZATION=f"Bearer {token}")
@@ -131,7 +131,7 @@ class AgentPortalApiTests(TestCase):
         self.assertEqual(res.data["code"], "NOT_AGENT")
 
     def test_choose_role_endpoint_rejects_second_choice(self):
-        res = self.client.post("/api/v1/user/profile/choose-role/", {"role": "customer"}, format="json")
+        res = self.client.post("/api/v1/user/profile/choose-role/", {"role": "merchant"}, format="json")
         self.assertEqual(res.status_code, 409)
         self.assertEqual(res.data["code"], "ROLE_ALREADY_CHOSEN")
 
@@ -140,7 +140,7 @@ class AgentPortalApiTests(TestCase):
 
         self.svc.register(phone="13900000063", password="Test@123", sms_code="")
         customer = EndUser.objects.get(phone="13900000063")
-        self.svc.choose_role(customer, "customer")
+        self.svc.choose_role(customer, "merchant")
         customer.refresh_from_db()
         payload = {
             **ONBOARDING_PAYLOAD,
@@ -175,7 +175,7 @@ class AgentPortalApiTests(TestCase):
         other = Agent.objects.create(agent_no="Aa11Bb22", agent_name="Other HTTP Agent")
         self.svc.register(phone="13900000064", password="Test@123", sms_code="")
         customer = EndUser.objects.get(phone="13900000064")
-        self.svc.choose_role(customer, "customer")
+        self.svc.choose_role(customer, "merchant")
         customer.refresh_from_db()
         payload = {
             **ONBOARDING_PAYLOAD,
@@ -317,7 +317,7 @@ class AgentProxyRemittanceApiTests(TestCase):
 
         self.svc.register(phone="13900000072", password="Test@123", sms_code="")
         self.customer = EndUser.objects.get(phone="13900000072")
-        self.svc.choose_role(self.customer, "customer")
+        self.svc.choose_role(self.customer, "merchant")
         self.customer.refresh_from_db()
         self.customer.default_merchant = self.merchant
         self.customer.onboarding_status = "approved"
@@ -341,6 +341,8 @@ class AgentProxyRemittanceApiTests(TestCase):
         row = next(item for item in res.data["items"] if item["id"] == str(self.merchant.id))
         self.assertTrue(row["remittance_eligibility"]["eligible"])
         self.assertEqual(row["end_user_id"], str(self.customer.id))
+        self.assertIn("customer_count", row)
+        self.assertEqual(row["customer_count"], 0)
 
     def test_agent_quote_and_apply_skips_agent_review(self):
         from apps.payment.models import PaymentOrder
@@ -425,10 +427,17 @@ class AgentProxyRemittanceApiTests(TestCase):
         self.assertEqual(res.data["code"], "NOT_AGENT")
 
     def test_agent_cannot_apply_customer_quote(self):
+        from apps.agent.models import AgentCustomer
         from apps.payment.services.remittance_quote import RemittanceQuoteService
 
+        agent_customer = AgentCustomer.objects.create(
+            merchant=self.merchant,
+            legal_name="Buyer One",
+            kyc_status=AgentCustomer.KycStatus.APPROVED,
+        )
         quote = RemittanceQuoteService().create_quote(
             merchant=self.merchant,
+            agent_customer=agent_customer,
             amount=Decimal("500"),
             from_currency="USD",
             to_currency="CNY",

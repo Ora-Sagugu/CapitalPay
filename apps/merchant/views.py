@@ -10,7 +10,7 @@ from rest_framework.response import Response
 from apps.core.exceptions import BusinessException
 from apps.rbac.authentication import JWTAuthentication
 from apps.rbac.permissions import RequiresFeature
-from .models import Merchant, MerchantKYC, MerchantFee, MerchantSettlementAccount, MerchantPaymentProduct, MerchantSplitConfig
+from .models import Merchant, MerchantKYC, MerchantFee, MerchantPaymentProduct, MerchantSplitConfig
 from .serializers import (
     MerchantSerializer, MerchantListSerializer, MerchantKYCSerializer,
     MerchantFeeSerializer, SettlementAccountSerializer, PaymentProductSerializer,
@@ -26,10 +26,16 @@ class MerchantViewSet(RequiresFeature, viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
     feature_code = "feature:merchants"
     ACTION_FEATURES = {
+        "create": "feature:merchants.write",
+        "update": "feature:merchants.write",
+        "partial_update": "feature:merchants.write",
+        "destroy": "feature:merchants.write",
         "review_kyc": "feature:merchants.approve",
         "activate": "feature:merchants.approve",
-        "suspend": "feature:merchants.approve",
-        "close": "feature:merchants.approve",
+        "suspend": "feature:merchants.suspend",
+        "close": "feature:merchants.suspend",
+        "settled_funds_export": "feature:reports.export",
+        "settled_orders_export": "feature:reports.export",
         "update_risk_level": "feature:merchants.approve",
         "update_sanction_status": "feature:merchants.approve",
     }
@@ -130,13 +136,6 @@ class MerchantViewSet(RequiresFeature, viewsets.ModelViewSet):
                     is_deleted=False,
                 ),
                 to_attr="_remittance_products",
-            ),
-            Prefetch(
-                "settlement_accounts",
-                queryset=MerchantSettlementAccount.objects.filter(
-                    is_default=True, is_deleted=False
-                ),
-                to_attr="_default_settlement_accounts",
             ),
         )
         search = request.query_params.get("search", "").strip()

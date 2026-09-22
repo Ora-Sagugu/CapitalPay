@@ -31,7 +31,7 @@ def cashier_order(request, order_no):
         return err
     return Response({
         "order_no": order.order_no,
-        "merchant_name": order.merchant.merchant_name,
+        "merchant_name": order.party_name,
         "amount": str(order.amount),
         "fee_amount": str(order.fee_amount),
         "currency": order.currency,

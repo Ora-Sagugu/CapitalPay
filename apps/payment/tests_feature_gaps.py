@@ -227,7 +227,7 @@ class PayNotifyRoutingTest(TestCase):
 
     def test_routing_log_on_pre_order(self):
         from apps.routing.models import BankChannel, RoutingLog
-        BankChannel.objects.create(bank_code="MOCK", bank_name="Mock Bank")
+        BankChannel.objects.create(bank_code="MOCK", bank_name="Mock Bank", account_number="6200990000000001")
         order = PreOrderService().create_pre_order(
             merchant_no="GAP_M010", merchant_order_no="MO_RTE",
             amount=Decimal("80.00"), pay_method="WIRE_TRANSFER",

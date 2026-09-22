@@ -4,7 +4,7 @@
     <KpiCards :items="kpis" />
     <div class="page-card">
       <div class="toolbar">
-        <el-select v-model="filters.merchant_id" placeholder="Customer" clearable filterable style="width: 180px" @change="reload">
+        <el-select v-model="filters.merchant_id" placeholder="Merchant" clearable filterable style="width: 180px" @change="reload">
           <el-option v-for="m in merchants" :key="m.id" :label="m.merchant_name" :value="m.id" />
         </el-select>
         <el-select v-model="filters.currency" placeholder="Currency" clearable style="width: 120px" @change="reload">
@@ -44,7 +44,7 @@
 
     <el-dialog v-model="createVisible" title="Create account" width="480px">
       <el-form :model="createForm" label-width="100px">
-        <el-form-item label="Customer">
+        <el-form-item label="Merchant">
           <el-select v-model="createForm.merchant" filterable style="width: 100%">
             <el-option v-for="m in merchants" :key="m.id" :label="m.merchant_name" :value="m.id" />
           </el-select>

@@ -125,12 +125,13 @@ class Command(BaseCommand):
 
         agents = self._create_agents()
         merchants = self._create_merchants(agents)
+        customers = self._create_merchant_customers(merchants)
         self._create_param_fees()
         nostro_accounts = self._create_nostro_accounts()
         self._create_bank_channels()
         orders = self._create_payment_orders(merchants)
         end_users = self._create_user_portal_data(merchants, agents, orders)
-        demo_orders = self._create_demo_workflow_orders(merchants, agents, end_users)
+        demo_orders = self._create_demo_workflow_orders(merchants, agents, end_users, customers)
         orders.extend(demo_orders)
         refunds = self._create_refunds(orders)
         self._create_reconciliation(nostro_accounts, orders)
@@ -144,17 +145,18 @@ class Command(BaseCommand):
         fx_count = self._create_exchange_rates()
         scan_count = self._create_sanction_scans(merchants, orders)
         report_stats = self._create_daily_reports()
-        grace_stats = self._enrich_grace_nyambura(agents, merchants, end_users)
+        grace_stats = self._enrich_grace_nyambura(agents, merchants, end_users, customers)
 
         window_from = (timezone.localdate() - timedelta(days=6)).isoformat()
         window_to = timezone.localdate().isoformat()
         self.stdout.write(self.style.SUCCESS("\nDemo data loaded."))
         self.stdout.write(f"  Window: {window_from} to {window_to}")
         self.stdout.write(
-            f"  Merchants: {len(merchants)} "
-            "(Horizon + Savannah + Kilimanjaro under Grace; Lagos Agro; Cape Coast; Accra Digital suspended)"
+            f"  Merchants: {len(merchants)} independent books "
+            "(Horizon, Lagos Agro, Cape Coast, Accra Digital suspended)"
         )
-        self.stdout.write("  Agents: 3 (Grace has an expanded East-Africa book)")
+        self.stdout.write(f"  Agent customers: {len(customers)} (no portal login)")
+        self.stdout.write("  Agents: 3 (Grace holds an East-Africa CURRENT book)")
         self.stdout.write("  Nostro accounts: 3")
         self.stdout.write("  Bank channels: 10 (fee waterfall: ICBC cheapest but low USD balance)")
         self.stdout.write(f"  Payment orders: {len(orders)} (USD, mixed statuses + demo workflow)")
@@ -168,36 +170,35 @@ class Command(BaseCommand):
         self.stdout.write(f"  Daily reports: {report_stats}")
         self.stdout.write("  RBAC: 25 functions + 4 roles + 4 ops users")
         self.stdout.write(
-            f"  Grace enrichment: +{grace_stats['merchants']} merchants, "
-            f"+{grace_stats['customers']} customers, "
+            f"  Grace enrichment: +{grace_stats['customers']} customers, "
             f"+{grace_stats['fee_shares']} fee shares, "
-            f"VA top-ups on {grace_stats['va_boosted']} books"
+            f"CURRENT top-ups on {grace_stats['va_boosted']} books"
         )
-        self.stdout.write("  Portals: gmail logins, password 123456 — see docs/账户和密码.md")
+        self.stdout.write("  Portals: gmail logins, password 123456")
         self.stdout.write(f"  FX pairs: {fx_count} rows across 7 days")
         self.stdout.write("")
         self.stdout.write(self.style.MIGRATE_HEADING("Demo logins"))
         self.stdout.write("  Ops console       http://localhost:1025")
         self.stdout.write("    admin / 123456       Super Admin")
-        self.stdout.write("    maker / 123456       Maker")
-        self.stdout.write("    checker / 123456     Checker")
-        self.stdout.write("    authoriser / 123456  Authoriser")
-        self.stdout.write("  Agent portal      http://localhost:1026/login  (gmail only)")
+        self.stdout.write("    ops / 123456         Merchant Ops")
+        self.stdout.write("    compliance / 123456  Compliance / Risk")
+        self.stdout.write("    finance / 123456     Finance")
+        self.stdout.write("    support / 123456     Customer Support")
+        self.stdout.write("    analyst / 123456     Analyst / Read-only")
+        self.stdout.write("  Agent portal      http://localhost:1026/login")
         self.stdout.write(f"    {_gmail_display('Grace Nyambura')} / 123456   EastAfrica Collection (rich demo book)")
         self.stdout.write(f"    {_gmail_display('Adewale Balogun')} / 123456  Sahel Corridor")
         self.stdout.write(f"    {_gmail_display('Ama Serwaa')} / 123456       Gulf Coast Collections")
-        self.stdout.write("  Customer portal   http://localhost:1027/login  (gmail only)")
-        self.stdout.write(f"    {_gmail_display('Daniel Ochieng')} / 123456  under Grace (Horizon)")
-        self.stdout.write(f"    {_gmail_display('Mary Achieng')} / 123456    under Grace (Savannah Imports)")
-        self.stdout.write(f"    {_gmail_display('Chioma Eze')} / 123456      under Adewale (Lagos Agro)")
-        self.stdout.write(f"    {_gmail_display('Kwame Asante')} / 123456    under Ama (Cape Coast)")
-        self.stdout.write("    See docs/账户和密码.md for the full roster")
+        self.stdout.write("  Merchant portal   http://localhost:1027/login")
+        self.stdout.write(f"    {_gmail_display('Amara Wanjiku')} / 123456   Horizon Trade (independent)")
+        self.stdout.write(f"    {_gmail_display('Chinedu Okonkwo')} / 123456 Lagos Agro (independent)")
+        self.stdout.write(f"    {_gmail_display('Abena Owusu')} / 123456     Cape Coast Export (independent)")
         self.stdout.write("    (SMS mock code: 000000)")
         self.stdout.write("")
         self.stdout.write(self.style.MIGRATE_HEADING("Demo workflow tips"))
-        self.stdout.write("  Agent Orders: needs_review shows customer remittance waiting for agent agree")
+        self.stdout.write("  Agent Orders: PAYDEMOAGENT01 is an agent-booked remittance awaiting CapitalPay")
         self.stdout.write("  Ops Orders: PENDING_REVIEW = CapitalPay application queue; Approve then Confirm transfer")
-        self.stdout.write("  Confirm transfer: ICBC is cheapest but low USD balance → waterfall recommends next bank")
+        self.stdout.write("  Confirm transfer: ICBC leftover USD can be used with a second bank when the payout is larger")
         self.stdout.write("  Grace Earnings: period filters show multi-week / month / quarter Agent Fee history")
         self.stdout.write("  Re-seed: python manage.py seed_data --reset")
 
@@ -350,14 +351,12 @@ class Command(BaseCommand):
 
         for agent in (a1, a2, a3):
             ensure_agent_accounts(agent, "USD")
+            ensure_agent_accounts(agent, "EUR")
             ensure_agent_accounts(agent, "CNY")
         return [a1, a2, a3]
 
     def _create_merchants(self, agents):
         self.stdout.write("  Creating merchants...")
-        from apps.agent.models import AgentMerchant
-
-        a1, a2, a3 = agents[0], agents[1], agents[2]
         merchants = []
 
         m1 = Merchant.objects.create(
@@ -373,7 +372,6 @@ class Command(BaseCommand):
             legal_person_name="Amara Wanjiku",
             license_expiry_date=_days_ago(-365 * 2).date(),
             risk_level="LOW",
-            agent=a1,
         )
         MerchantKYC.objects.create(
             merchant=m1,
@@ -449,7 +447,6 @@ class Command(BaseCommand):
             legal_person_name="Chinedu Okonkwo",
             license_expiry_date=_days_ago(-400).date(),
             risk_level="MEDIUM",
-            agent=a2,
         )
         MerchantKYC.objects.create(
             merchant=m2,
@@ -570,7 +567,6 @@ class Command(BaseCommand):
             legal_person_name="Kwame Asante",
             license_expiry_date=_days_ago(-365).date(),
             risk_level="LOW",
-            agent=a3,
         )
         MerchantKYC.objects.create(
             merchant=m4,
@@ -636,21 +632,60 @@ class Command(BaseCommand):
                 },
             )
 
-        AgentMerchant.objects.create(
-            agent=a1, merchant=m1, commission_rate=Decimal("0.500000"),
-            effective_from=_days_ago(180).date(),
-        )
-        AgentMerchant.objects.create(
-            agent=a2, merchant=m2, commission_rate=Decimal("0.800000"),
-            effective_from=_days_ago(90).date(),
-        )
-        AgentMerchant.objects.create(
-            agent=a3, merchant=m4, commission_rate=Decimal("0.600000"),
-            effective_from=_days_ago(110).date(),
-        )
-
-        self.stdout.write(f"    Done: {len(merchants)} merchants")
+        self.stdout.write(f"    Done: {len(merchants)} independent merchants")
         return merchants
+
+    def _create_merchant_customers(self, merchants):
+        self.stdout.write("  Creating merchant customers (no portal login)...")
+        from apps.agent.models import AgentCustomer
+
+        m1, m2, m3 = merchants[0], merchants[1], merchants[min(2, len(merchants) - 1)]
+        specs = [
+            (m1, "Horizon Trade Limited", "Amara Wanjiku", "254712000101", "amara.wanjiku@horizontrade.co.ke",
+             "Kenya", "The Address, Westlands, Nairobi", "Equity Bank Kenya", "Horizon Trade Limited",
+             "0180198765432", "EQBLKENA", AgentCustomer.KycStatus.APPROVED),
+            (m1, "Savannah Imports Limited", "Mary Achieng", "254711200501", "mary.achieng@savannahimports.co.ke",
+             "Kenya", "Westlands Business Park, Nairobi", "Equity Bank Kenya", "Savannah Imports Limited",
+             "0180555012345", "EQBLKENA", AgentCustomer.KycStatus.APPROVED),
+            (m1, "Kilimanjaro Freight Ltd", "Hassan Juma", "254722300601", "hassan.juma@kilimanjarofreight.co.ke",
+             "Kenya", "Mombasa Road Logistics Hub, Nairobi", "KCB Bank Kenya", "Kilimanjaro Freight Ltd",
+             "1100678901234", "KCBLKENX", AgentCustomer.KycStatus.APPROVED),
+            (m1, "Mombasa Tea Traders", "Lucy Njeri", "254712345010", "lucy.njeri@mombasatea.ke",
+             "Kenya", "Moi Avenue, Mombasa", "Equity Bank Kenya", "Mombasa Tea Traders",
+             "0180666011111", "EQBLKENA", AgentCustomer.KycStatus.SUBMITTED),
+            (m2, "Lagos Agro Commodities Ltd", "Chinedu Okonkwo", "234803000202", "chinedu.okonkwo@lagosagro.ng",
+             "Nigeria", "14 Adeola Odeku Street, Victoria Island, Lagos", "Guaranty Trust Bank",
+             "Lagos Agro Commodities Ltd", "0009876543", "GTBINGLA", AgentCustomer.KycStatus.APPROVED),
+            (m3, "Cape Coast Export Ltd", "Kwame Asante", "233244123001", "kwame.asante@capecoast.gh",
+             "Ghana", "15 Commercial Street, Cape Coast", "Ecobank Ghana", "Cape Coast Export Ltd",
+             "1441556677889", "ECOCGHAC", AgentCustomer.KycStatus.APPROVED),
+        ]
+        created = []
+        for merchant, legal, contact, phone, email, nationality, address, bank, account_name, account_no, swift, status in specs:
+            row = AgentCustomer.objects.create(
+                merchant=merchant,
+                agent=None,
+                legal_name=legal,
+                contact_name=contact,
+                contact_phone=phone,
+                contact_email=email,
+                id_type="passport",
+                id_number=f"A{phone[-6:]}",
+                nationality=nationality,
+                address=address,
+                license_expiry_date=_days_ago(-400).date(),
+                kyc_status=status,
+                reviewer="seed-data" if status == AgentCustomer.KycStatus.APPROVED else "",
+                reviewed_at=_days_ago(30) if status == AgentCustomer.KycStatus.APPROVED else None,
+                bank_name=bank,
+                account_name=account_name,
+                bank_account=account_no,
+                swift_code=swift,
+            )
+            created.append(row)
+
+        self.stdout.write(f"    Done: {len(created)} merchant customers")
+        return created
 
     def _create_param_fees(self):
         self.stdout.write("  Creating correspondent banks and fee models...")
@@ -773,64 +808,64 @@ class Command(BaseCommand):
         # Ranking by total assets (S&P Global / common industry lists). Balances are USD nostro only.
         banks = [
             {"bank_code": "ICBC", "bank_name": "Industrial and Commercial Bank of China", "country": "China",
+             "account_number": "0180100123456",
              "channel_type": "wire", "status": "active", "priority": 100,
              "fee_rate": "0.0008", "min_fee": "5.00", "max_fee": "250.00",
-             "usd_balance": "4500", "hkd_balance": "0", "cny_balance": "1200000",
-             "supported_currencies": ["USD", "EUR", "GBP", "CNY"],
+             "currency": "USD", "balance": "4500",
              "supported_countries": ["CN", "HK", "US", "GB", "SG"]},
             {"bank_code": "ABC", "bank_name": "Agricultural Bank of China", "country": "China",
+             "account_number": "0550010023456",
              "channel_type": "wire", "status": "active", "priority": 98,
              "fee_rate": "0.0011", "min_fee": "8.00", "max_fee": "280.00",
-             "usd_balance": "7800000", "hkd_balance": "0", "cny_balance": "900000",
-             "supported_currencies": ["USD", "EUR", "CNY"],
+             "currency": "USD", "balance": "7800000",
              "supported_countries": ["CN", "HK", "US", "GB"]},
             {"bank_code": "CCB", "bank_name": "China Construction Bank", "country": "China",
+             "account_number": "6217000012345678",
              "channel_type": "online", "status": "active", "priority": 96,
              "fee_rate": "0.0011", "min_fee": "8.00", "max_fee": "280.00",
-             "usd_balance": "7200000", "hkd_balance": "0", "cny_balance": "800000",
-             "supported_currencies": ["USD", "EUR", "GBP", "CNY"],
+             "currency": "USD", "balance": "7200000",
              "supported_countries": ["CN", "HK", "US", "GB", "AU"]},
             {"bank_code": "BOC", "bank_name": "Bank of China", "country": "China",
+             "account_number": "4563510000123456",
              "channel_type": "wire", "status": "active", "priority": 94,
              "fee_rate": "0.0012", "min_fee": "10.00", "max_fee": "300.00",
-             "usd_balance": "6500000", "hkd_balance": "2100000", "cny_balance": "1500000",
-             "supported_currencies": ["USD", "EUR", "GBP", "CNY", "HKD"],
+             "currency": "USD", "balance": "6500000",
              "supported_countries": ["CN", "HK", "US", "GB", "SG", "AU"]},
             {"bank_code": "JPM", "bank_name": "JPMorgan Chase", "country": "United States",
+             "account_number": "0001122334",
              "channel_type": "wire", "status": "active", "priority": 92,
              "fee_rate": "0.0010", "min_fee": "10.00", "max_fee": "350.00",
-             "usd_balance": "5800000", "hkd_balance": "0", "cny_balance": "0",
-             "supported_currencies": ["USD", "EUR", "GBP"],
+             "currency": "USD", "balance": "5800000",
              "supported_countries": ["US", "GB", "DE", "SG", "HK"]},
             {"bank_code": "HSBC", "bank_name": "HSBC Holdings", "country": "United Kingdom",
+             "account_number": "070012345678",
              "channel_type": "online", "status": "active", "priority": 90,
              "fee_rate": "0.0012", "min_fee": "12.00", "max_fee": "400.00",
-             "usd_balance": "5200000", "hkd_balance": "3100000", "cny_balance": "0",
-             "supported_currencies": ["USD", "EUR", "GBP", "HKD"],
+             "currency": "USD", "balance": "5200000",
              "supported_countries": ["GB", "HK", "US", "SG", "CN"]},
             {"bank_code": "BAC", "bank_name": "Bank of America", "country": "United States",
+             "account_number": "435601234567",
              "channel_type": "ach", "status": "active", "priority": 88,
              "fee_rate": "0.0013", "min_fee": "10.00", "max_fee": "350.00",
-             "usd_balance": "4800000", "hkd_balance": "0", "cny_balance": "0",
-             "supported_currencies": ["USD", "EUR", "GBP"],
+             "currency": "USD", "balance": "4800000",
              "supported_countries": ["US", "GB", "CA", "MX"]},
             {"bank_code": "BNP", "bank_name": "BNP Paribas", "country": "France",
+             "account_number": "FR7630004000031234567890143",
              "channel_type": "wire", "status": "active", "priority": 86,
              "fee_rate": "0.0014", "min_fee": "12.00", "max_fee": "400.00",
-             "usd_balance": "4200000", "hkd_balance": "0", "cny_balance": "0",
-             "supported_currencies": ["USD", "EUR", "GBP"],
+             "currency": "USD", "balance": "4200000",
              "supported_countries": ["FR", "BE", "IT", "GB", "US"]},
             {"bank_code": "CRAG", "bank_name": "Credit Agricole", "country": "France",
+             "account_number": "FR7611808009101234567890144",
              "channel_type": "wire", "status": "active", "priority": 84,
              "fee_rate": "0.0015", "min_fee": "12.00", "max_fee": "420.00",
-             "usd_balance": "3800000", "hkd_balance": "0", "cny_balance": "0",
-             "supported_currencies": ["USD", "EUR", "GBP"],
+             "currency": "USD", "balance": "3800000",
              "supported_countries": ["FR", "IT", "GB", "US"]},
             {"bank_code": "PSBC", "bank_name": "Postal Savings Bank of China", "country": "China",
+             "account_number": "6217990012345678",
              "channel_type": "realtime", "status": "active", "priority": 82,
              "fee_rate": "0.0016", "min_fee": "8.00", "max_fee": "300.00",
-             "usd_balance": "3400000", "hkd_balance": "0", "cny_balance": "600000",
-             "supported_currencies": ["USD", "CNY"],
+             "currency": "USD", "balance": "3400000",
              "supported_countries": ["CN", "HK", "US"]},
         ]
         for b in banks:
@@ -850,9 +885,8 @@ class Command(BaseCommand):
             for _ in range(random.randint(4, 8)):
                 amt = round(random.uniform(2500, 85000), 2)
                 fee = round(amt * float(bank.fee_rate), 2)
-                fee = max(fee, float(bank.min_fee))
                 fee = min(fee, float(bank.max_fee))
-                bal = float(bank.usd_balance)
+                bal = float(bank.balance)
                 d = _at(random.randint(0, 6), random.randint(8, 16), random.randint(0, 59))
                 bank_prn_seq = (bank_prn_seq % 99) + 1
                 # Demo wire refs use prefix 9 + day-of-year + seq (valid PRN shape).
@@ -1220,32 +1254,19 @@ class Command(BaseCommand):
                 )
                 _stamp(detail, settled_at)
                 channel = (order.amount * Decimal("0.003")).quantize(Decimal("0.01"))
-                rate = Decimal("0")
-                if merchant.agent_id:
-                    from apps.agent.models import AgentMerchant
-
-                    am = AgentMerchant.objects.filter(
-                        agent=merchant.agent, merchant=merchant, is_deleted=False,
-                    ).first()
-                    if am and am.commission_rate > 0:
-                        rate = Decimal(str(am.commission_rate))
-                    else:
-                        rate = Decimal(str(merchant.agent.commission_rate or 0))
-                agent_fee = (order.fee_amount * rate).quantize(Decimal("0.01"))
-                platform = (order.fee_amount - agent_fee).quantize(Decimal("0.01"))
                 share = FeeShare.objects.create(
                     settlement_detail=detail,
                     payment_order=order,
-                    agent=merchant.agent,
+                    agent=order.agent,
                     order_no=order.order_no,
-                    merchant_name=merchant.merchant_name,
-                    agent_name=merchant.agent.short_name if merchant.agent_id else "",
+                    merchant_name=order.party_name,
+                    agent_name=order.agent.short_name if order.agent_id else "",
                     bank_channel_name=order.bank_code or "",
                     amount=order.amount,
                     total_fee=order.fee_amount,
                     channel_fee=channel,
-                    platform_fee=platform,
-                    agent_fee=agent_fee,
+                    platform_fee=order.fee_amount,
+                    agent_fee=Decimal("0"),
                 )
                 _stamp(share, settled_at)
 
@@ -1409,7 +1430,7 @@ class Command(BaseCommand):
             idx += 1
             txn_time = order.pay_received_at or order.created_at or timezone.now()
             note = ingest_credit(
-                amount=order.amount,
+                amount=order.expected_collection_amount(),
                 currency=order.from_currency or order.currency or "USD",
                 remark=f"PRN:{order.prn_code}",
                 prn_code=order.prn_code,
@@ -1434,7 +1455,7 @@ class Command(BaseCommand):
             bank = banks[0] if banks else None
             mismatch_time = timezone.now() - timedelta(minutes=25)
             note = ingest_credit(
-                amount=Decimal(pending.amount) + Decimal("25.00"),
+                amount=Decimal(pending.expected_collection_amount()) + Decimal("25.00"),
                 currency=pending.from_currency or pending.currency or "USD",
                 remark=f"PRN:{pending.prn_code}",
                 prn_code=pending.prn_code,
@@ -1595,30 +1616,21 @@ class Command(BaseCommand):
         AuthService().ensure_ops_rbac()
         self.stdout.write(
             f"    Done: {len(FEATURE_CODES)} functions + {len(SYSTEM_ROLE_CODES)} roles "
-            "+ ops users admin/maker/checker/authoriser (password 123456)"
+            "+ ops users admin/ops/compliance/finance/support/analyst (password 123456)"
         )
 
     def _create_user_portal_data(self, merchants, agents, orders):
-        self.stdout.write("  Creating customer/agent portal users...")
+        self.stdout.write("  Creating merchant/agent portal users...")
         from apps.user_portal.models import EndUser, UserOnboarding
 
         m1, m2, _m3, m4 = merchants[0], merchants[1], merchants[2], merchants[3]
         a1, a2, a3 = agents[0], agents[1], agents[2]
 
-        # 3 agents × 3 customers. Login/register email = NameSurname@gmail.com, password 123456.
+        # Independent merchants (no Agent). Login email = NameSurname@gmail.com, password 123456.
         test_users = [
-            # EastAfrica Collection / Horizon Trade (Grace Nyambura)
-            ("254712345001", DEMO_PORTAL_PASSWORD, "Daniel Ochieng", "Daniel Ochieng", m1, "Kenya"),
-            ("254722345006", DEMO_PORTAL_PASSWORD, "Faith Wambui", "Faith Wambui", m1, "Kenya"),
-            ("254733345003", DEMO_PORTAL_PASSWORD, "Joseph Kamau", "Joseph Kamau", m1, "Kenya"),
-            # Sahel Corridor / Lagos Agro (Adewale Balogun)
-            ("2348031234502", DEMO_PORTAL_PASSWORD, "Chioma Eze", "Chioma Eze", m2, "Nigeria"),
-            ("2348091234508", DEMO_PORTAL_PASSWORD, "Ngozi Okeke", "Ngozi Okeke", m2, "Nigeria"),
-            ("2348011234509", DEMO_PORTAL_PASSWORD, "Tunde Bakare", "Tunde Bakare", m2, "Nigeria"),
-            # Gulf Coast Collections / Cape Coast Export (Ama Serwaa)
-            ("233244123001", DEMO_PORTAL_PASSWORD, "Kwame Asante", "Kwame Asante", m4, "Ghana"),
-            ("233244123002", DEMO_PORTAL_PASSWORD, "Efua Mensah", "Efua Mensah", m4, "Ghana"),
-            ("233244123004", DEMO_PORTAL_PASSWORD, "Yaw Boateng", "Yaw Boateng", m4, "Ghana"),
+            ("254712000101", DEMO_PORTAL_PASSWORD, "Amara Wanjiku", "Amara Wanjiku", m1, "Kenya"),
+            ("234803000202", DEMO_PORTAL_PASSWORD, "Chinedu Okonkwo", "Chinedu Okonkwo", m2, "Nigeria"),
+            ("233244200404", DEMO_PORTAL_PASSWORD, "Abena Owusu", "Abena Owusu", m4, "Ghana"),
         ]
 
         end_users = []
@@ -1634,7 +1646,7 @@ class Command(BaseCommand):
                 real_name=real_name,
                 is_verified=True,
                 default_merchant=merchant,
-                portal_role="customer",
+                portal_role="merchant",
                 onboarding_status="approved",
                 onboarding_submitted_at=_days_ago(40),
                 onboarding_reviewed_at=_days_ago(38),
@@ -1648,7 +1660,7 @@ class Command(BaseCommand):
                 contact_phone=phone,
                 nationality=nationality,
                 address="Demo registered address",
-                agent_code=merchant.agent.agent_no if merchant.agent_id else "",
+                agent_code="",
                 license_expiry_date=_days_ago(-400).date(),
                 bank_name=(
                     "Equity Bank Kenya" if merchant == m1
@@ -1658,7 +1670,7 @@ class Command(BaseCommand):
                 branch_name="Main Branch",
                 account_name=merchant.merchant_name,
                 bank_account=f"0180{phone[-6:]}",
-                agent_review_status=UserOnboarding.AgentReviewStatus.APPROVED,
+                agent_review_status=UserOnboarding.AgentReviewStatus.NONE,
             )
             end_users.append(user)
 
@@ -1707,9 +1719,9 @@ class Command(BaseCommand):
             merchant=m1,
             bank_code="ICBC",
             bank_name="Industrial and Commercial Bank of China",
-            account_holder="Daniel Ochieng",
+            account_holder="Amara Wanjiku",
             account_number=encrypt_field("0180277001234"),
-            bind_token=encrypt_field("token_ochieng_001"),
+            bind_token=encrypt_field("token_wanjiku_001"),
             status=UserAccount.BindStatus.ACTIVE,
             bind_at=_days_ago(30),
         )
@@ -1720,18 +1732,18 @@ class Command(BaseCommand):
             bank_name="HSBC Holdings",
             account_holder="Horizon Trade Limited",
             account_number=encrypt_field("0100001234567"),
-            bind_token=encrypt_field("token_ochieng_002"),
+            bind_token=encrypt_field("token_wanjiku_002"),
             status=UserAccount.BindStatus.ACTIVE,
             bind_at=_days_ago(20),
         )
         UserAccount.objects.create(
-            user_id=str(end_users[3].id),
+            user_id=str(end_users[1].id),
             merchant=m2,
             bank_code="JPM",
             bank_name="JPMorgan Chase",
-            account_holder="Chioma Eze",
+            account_holder="Chinedu Okonkwo",
             account_number=encrypt_field("0005566778"),
-            bind_token=encrypt_field("token_eze_001"),
+            bind_token=encrypt_field("token_okonkwo_001"),
             status=UserAccount.BindStatus.ACTIVE,
             bind_at=_days_ago(15),
         )
@@ -1740,7 +1752,7 @@ class Command(BaseCommand):
         for i, order in enumerate(orders):
             if order.status in ("PENDING_REVIEW", "PENDING_PAY", "PENDING_AGENT_REVIEW", "CLOSED"):
                 continue
-            user = end_users[i % 9]
+            user = end_users[i % 3]
             UserPaymentDetail.objects.create(
                 user_id=str(user.id),
                 order=order,
@@ -1752,280 +1764,111 @@ class Command(BaseCommand):
             payment_detail_count += 1
 
         self.stdout.write(
-            f"    Done: {len(end_users)} users (9 customers + 3 agents) + 3 bound accounts + {payment_detail_count} payment details"
+            f"    Done: {len(end_users)} users (3 independent merchants + 3 agents) + 3 bound accounts + {payment_detail_count} payment details"
         )
         return end_users
 
-    def _enrich_grace_nyambura(self, agents, merchants, end_users):
-        """Expand Grace's book: more merchants, portal customers, VA float, historical Agent Fee."""
+    def _enrich_grace_nyambura(self, agents, merchants, end_users, customers):
+        """Expand the first merchant's customer book and Grace agent fee history."""
         self.stdout.write("  Enriching Grace Nyambura demo book...")
-        from apps.agent.models import AgentMerchant
-        from apps.user_portal.models import EndUser, UserOnboarding
+        from apps.agent.models import AgentCustomer
+        from apps.agent.services import get_agent_ledger_va
 
         a1 = agents[0]
         m1 = merchants[0]
-        rate = Decimal(str(a1.commission_rate or "0.500000"))
-
-        def _seed_merchant(
-            *,
-            merchant_no,
-            merchant_name,
-            short_name,
-            contact_name,
-            contact_phone,
-            contact_email,
-            legal_name,
-            id_plain,
-            license_no,
-            address,
-            scope,
-            capital,
-            established_days,
-            bank_name,
-            bank_branch,
-            account_number,
-            commission,
-        ):
-            merchant = Merchant.objects.create(
-                merchant_no=merchant_no,
-                merchant_name=merchant_name,
-                short_name=short_name,
-                status=Merchant.Status.PENDING,
-                contact_name=contact_name,
-                contact_phone=contact_phone,
-                contact_email=contact_email,
-                api_key=f"ak_{merchant_no.lower()}",
-                api_secret=f"sk_{merchant_no.lower()}_seed_demo_secret_01",
-                legal_person_name=legal_name,
-                license_expiry_date=_days_ago(-500).date(),
-                risk_level="LOW",
-                agent=a1,
-            )
-            MerchantKYC.objects.create(
-                merchant=merchant,
-                legal_person=legal_name,
-                id_number=encrypt_field(id_plain),
-                business_license=encrypt_field(license_no),
-                business_scope=scope,
-                registered_capital=capital,
-                established_date=_days_ago(established_days).date(),
-                registered_address=address,
-                id_type="PASSPORT",
-                id_number_plain=id_plain,
-                nationality="Kenya",
-                kyc_status="APPROVED",
-                reviewed_at=_days_ago(80),
-            )
-            MerchantFee.objects.create(
-                merchant=merchant,
-                product_type=MerchantFee.ProductType.WIRE_TRANSFER,
-                fee_model=MerchantFee.FeeModel.PERCENTAGE,
-                fee_rate=Decimal("0.003"),
-                min_fee=Decimal("10.00"),
-                max_fee=Decimal("500.00"),
-                effective_from=_days_ago(80).date(),
-            )
-            MerchantSettlementAccount.objects.create(
-                merchant=merchant,
-                bank_name=bank_name,
-                bank_branch=bank_branch,
-                account_name=merchant_name,
-                account_number=encrypt_field(account_number),
-                is_default=True,
-            )
-            MerchantPaymentProduct.objects.create(
-                merchant=merchant,
-                product_type="WIRE_TRANSFER",
-                is_enabled=True,
-                max_single_amount=Decimal("4000000"),
-                daily_limit=Decimal("15000000"),
-            )
-            MerchantSplitConfig.objects.get_or_create(
-                merchant=merchant,
-                defaults={
-                    "auto_split": True,
-                    "settlement_cycle": 1,
-                    "merchant_ratio": Decimal("0.9700"),
-                    "platform_ratio": Decimal("0.0200"),
-                    "agent_ratio": Decimal("0.0100"),
-                },
-            )
-            ensure_merchant_multi_currency_accounts(merchant)
-            merchant = MerchantLifecycleService().activate(
-                merchant,
-                reason_code="SEED_KYC_APPROVED",
-                comment="Grace East-Africa demo merchant",
-                actor="seed-data",
-                source="SEED_DATA",
-            )
-            AgentMerchant.objects.create(
-                agent=a1,
-                merchant=merchant,
-                commission_rate=commission,
-                effective_from=_days_ago(80).date(),
-            )
-            return merchant
-
-        m5 = _seed_merchant(
-            merchant_no="M20260005",
-            merchant_name="Savannah Imports Limited",
-            short_name="Savannah Imports",
-            contact_name="Mary Achieng",
-            contact_phone="254711200501",
-            contact_email="mary.achieng@savannahimports.co.ke",
-            legal_name="Mary Achieng",
-            id_plain="A00998112",
-            license_no="PVT-SAV-4412",
-            address="Westlands Business Park, Nairobi, Kenya",
-            scope="Import of FMCG, packaging and light industrial goods for East Africa retail.",
-            capital=Decimal("1600000"),
-            established_days=365 * 6,
-            bank_name="Equity Bank Kenya",
-            bank_branch="Westlands Branch",
-            account_number="0180555012345",
-            commission=Decimal("0.450000"),
-        )
-        m6 = _seed_merchant(
-            merchant_no="M20260006",
-            merchant_name="Kilimanjaro Freight Ltd",
-            short_name="Kilimanjaro Freight",
-            contact_name="Hassan Juma",
-            contact_phone="254722300601",
-            contact_email="hassan.juma@kilimanjarofreight.co.ke",
-            legal_name="Hassan Juma",
-            id_plain="A00887221",
-            license_no="PVT-KILI-7781",
-            address="Mombasa Road Logistics Hub, Nairobi, Kenya",
-            scope="Cross-border freight, bonded warehouse and corridor settlement services.",
-            capital=Decimal("2200000"),
-            established_days=365 * 10,
-            bank_name="KCB Bank Kenya",
-            bank_branch="Industrial Area Branch",
-            account_number="1100678901234",
-            commission=Decimal("0.550000"),
-        )
-        merchants.extend([m5, m6])
-
-        extra_customers = [
-            ("254712345010", "Lucy Njeri", m1, "Kenya"),
-            ("254712345011", "Peter Otieno", m1, "Kenya"),
-            ("254711200511", "Mary Achieng", m5, "Kenya"),
-            ("254711200512", "Brian Kiprop", m5, "Kenya"),
-            ("254711200513", "Esther Mutua", m5, "Kenya"),
-            ("254722300611", "Hassan Juma", m6, "Kenya"),
-            ("254722300612", "Amina Mwangi", m6, "Kenya"),
-            ("254722300613", "Samuel Onyango", m6, "Kenya"),
+        grace_customers = [row for row in customers if row.merchant_id == m1.id]
+        extras = [
+            (m1, "Nakuru Horticulture Ltd", "Peter Otieno", "254712345011", "peter.otieno@nakuruhort.ke",
+             "Kenya", "Kenyatta Avenue, Nakuru", "Equity Bank Kenya", "Nakuru Horticulture Ltd",
+             "0180777022222", "EQBLKENA", AgentCustomer.KycStatus.APPROVED),
+            (m1, "Kisumu Grain Brokers", "Brian Kiprop", "254711200512", "brian.kiprop@kisumugrain.ke",
+             "Kenya", "Oginga Odinga Street, Kisumu", "KCB Bank Kenya", "Kisumu Grain Brokers",
+             "1100888033333", "KCBLKENX", AgentCustomer.KycStatus.APPROVED),
+            (m1, "Eldoret Logistics Co", "Esther Mutua", "254711200513", "esther.mutua@eldoretlog.ke",
+             "Kenya", "Uganda Road, Eldoret", "Equity Bank Kenya", "Eldoret Logistics Co",
+             "0180999044444", "EQBLKENA", AgentCustomer.KycStatus.APPROVED),
         ]
-        new_users = []
-        for phone, real_name, merchant, nationality in extra_customers:
-            email = _gmail_from_name(real_name)
-            if EndUser.objects.filter(email=email).exists():
-                continue
-            pwd_hash = hashlib.sha256(f"user:{DEMO_PORTAL_PASSWORD}:b2b_user_salt".encode()).hexdigest()
-            user = EndUser.objects.create(
-                username="".join(real_name.split()),
-                phone=phone,
-                email=email,
-                password_hash=pwd_hash,
-                nickname=real_name,
-                real_name=real_name,
-                is_verified=True,
-                default_merchant=merchant,
-                portal_role="customer",
-                onboarding_status="approved",
-                onboarding_submitted_at=_days_ago(55),
-                onboarding_reviewed_at=_days_ago(52),
-                onboarding_reviewer="admin",
-            )
-            UserOnboarding.objects.create(
-                user=user,
-                legal_name=real_name,
-                id_type=UserOnboarding.IdType.PASSPORT,
-                id_number=f"A{phone[-6:]}",
+        new_customers = []
+        for merchant, legal, contact, phone, email, nationality, address, bank, account_name, account_no, swift, status in extras:
+            row = AgentCustomer.objects.create(
+                merchant=merchant,
+                agent=None,
+                legal_name=legal,
+                contact_name=contact,
                 contact_phone=phone,
+                contact_email=email,
+                id_type="passport",
+                id_number=f"A{phone[-6:]}",
                 nationality=nationality,
-                address="Demo registered address — East Africa",
-                agent_code=a1.agent_no,
+                address=address,
                 license_expiry_date=_days_ago(-400).date(),
-                bank_name="Equity Bank Kenya" if merchant != m6 else "KCB Bank Kenya",
-                branch_name="Main Branch",
-                account_name=merchant.merchant_name,
-                bank_account=f"0180{phone[-6:]}",
-                agent_review_status=UserOnboarding.AgentReviewStatus.APPROVED,
+                kyc_status=status,
+                reviewer="seed-data",
+                reviewed_at=_days_ago(40),
+                bank_name=bank,
+                account_name=account_name,
+                bank_account=account_no,
+                swift_code=swift,
             )
-            new_users.append(user)
-            end_users.append(user)
+            new_customers.append(row)
+            grace_customers.append(row)
 
-        # Boost available float on Grace-bound books (USD / EUR / CNY).
-        balance_plan = {
-            m1.id: {"USD": Decimal("385420.50"), "EUR": Decimal("94200.00"), "CNY": Decimal("128000.00")},
-            m5.id: {"USD": Decimal("156800.25"), "EUR": Decimal("42850.00"), "CNY": Decimal("0.00")},
-            m6.id: {"USD": Decimal("221450.75"), "EUR": Decimal("61500.00"), "CNY": Decimal("88000.00")},
-        }
         va_boosted = 0
-        for merchant_id, balances in balance_plan.items():
-            for currency, amount in balances.items():
-                va = VirtualAccount.objects.filter(
-                    merchant_id=merchant_id,
-                    currency=currency,
-                    status=VirtualAccount.VaStatus.ACTIVE,
-                    is_deleted=False,
-                ).first()
-                if not va:
-                    continue
-                va.ledger_balance = amount
-                va.available_balance = amount
-                va.save(update_fields=["ledger_balance", "available_balance", "updated_at"])
-                va_boosted += 1
+        for currency, amount in (
+            ("USD", Decimal("563671.50")),
+            ("EUR", Decimal("198550.00")),
+            ("CNY", Decimal("216000.00")),
+        ):
+            va = get_agent_ledger_va(a1, NostroAccount.AccountType.CURRENT, currency)
+            if not va:
+                continue
+            va.ledger_balance = amount
+            va.available_balance = amount
+            va.save(update_fields=["ledger_balance", "available_balance", "updated_at"])
+            va_boosted += 1
 
-        # Historical settled remittances + FeeShare (past week / month / quarter / year).
         fee_specs = [
-            # days_ago, merchant, amount, to_ccy, beneficiary
-            (1, m1, Decimal("14200.00"), "EUR", "Siemens AG"),
-            (2, m5, Decimal("8600.50"), "USD", "Unilever PLC"),
-            (4, m6, Decimal("19500.00"), "EUR", "Maersk Line"),
-            (6, m1, Decimal("22340.75"), "USD", "Caterpillar Inc"),
-            (9, m5, Decimal("11880.00"), "CNY", "Huawei Technologies"),
-            (11, m6, Decimal("15720.25"), "USD", "DHL Global Forwarding"),
-            (14, m1, Decimal("9800.00"), "EUR", "ABB Ltd"),
-            (18, m5, Decimal("26450.00"), "USD", "Nestle SA"),
-            (22, m6, Decimal("13200.40"), "EUR", "Schneider Electric"),
-            (28, m1, Decimal("30100.00"), "USD", "Honeywell International"),
-            (35, m5, Decimal("7450.00"), "USD", "Procter & Gamble"),
-            (42, m6, Decimal("18880.60"), "CNY", "Alibaba.com Singapore"),
-            (55, m1, Decimal("21600.00"), "EUR", "Atlas Copco"),
-            (68, m5, Decimal("10990.00"), "USD", "BASF SE"),
-            (82, m6, Decimal("25400.00"), "EUR", "Volvo Group"),
-            (95, m1, Decimal("16750.25"), "USD", "Kenya Ports Authority"),
-            (110, m5, Decimal("9200.00"), "EUR", "Philips NV"),
-            (125, m6, Decimal("27850.00"), "USD", "Cummins Inc"),
-            (150, m1, Decimal("14330.00"), "EUR", "Bosch GmbH"),
-            (175, m5, Decimal("20500.50"), "USD", "Amazon EU SARL"),
+            (1, 0, Decimal("14200.00"), "EUR", "Siemens AG"),
+            (2, 1, Decimal("8600.50"), "USD", "Unilever PLC"),
+            (4, 2, Decimal("19500.00"), "EUR", "Maersk Line"),
+            (6, 0, Decimal("22340.75"), "USD", "Caterpillar Inc"),
+            (9, 1, Decimal("11880.00"), "CNY", "Huawei Technologies"),
+            (11, 2, Decimal("15720.25"), "USD", "DHL Global Forwarding"),
+            (14, 0, Decimal("9800.00"), "EUR", "ABB Ltd"),
+            (18, 1, Decimal("26450.00"), "USD", "Nestle SA"),
+            (22, 2, Decimal("13200.40"), "EUR", "Schneider Electric"),
+            (28, 0, Decimal("30100.00"), "USD", "Honeywell International"),
+            (35, 1, Decimal("7450.00"), "USD", "Procter & Gamble"),
+            (42, 2, Decimal("18880.60"), "CNY", "Alibaba.com Singapore"),
+            (55, 0, Decimal("21600.00"), "EUR", "Atlas Copco"),
+            (68, 1, Decimal("10990.00"), "USD", "BASF SE"),
+            (82, 2, Decimal("25400.00"), "EUR", "Volvo Group"),
+            (95, 0, Decimal("16750.25"), "USD", "Kenya Ports Authority"),
+            (110, 1, Decimal("9200.00"), "EUR", "Philips NV"),
+            (125, 2, Decimal("27850.00"), "USD", "Cummins Inc"),
+            (150, 0, Decimal("14330.00"), "EUR", "Bosch GmbH"),
+            (175, 1, Decimal("20500.50"), "USD", "Amazon EU SARL"),
         ]
 
         fee_share_count = 0
-        for idx, (days_ago, merchant, amount, to_ccy, beneficiary) in enumerate(fee_specs, start=1):
+        for idx, (days_ago, customer_idx, amount, to_ccy, beneficiary) in enumerate(fee_specs, start=1):
             created = _at(days_ago, 10 + (idx % 6), 15 + (idx % 30))
             fee = (amount * Decimal("0.003")).quantize(Decimal("0.01"))
             if fee < Decimal("10.00"):
                 fee = Decimal("10.00")
-            am = AgentMerchant.objects.filter(agent=a1, merchant=merchant, is_deleted=False).first()
-            local_rate = Decimal(str(am.commission_rate)) if am and am.commission_rate else rate
-            agent_fee = (fee * local_rate).quantize(Decimal("0.01"))
-            platform_fee = (fee - agent_fee).quantize(Decimal("0.01"))
+            customer = grace_customers[customer_idx % len(grace_customers)]
+            agent_fee = fee
+            platform_fee = Decimal("0.00")
             channel_fee = (amount * Decimal("0.003")).quantize(Decimal("0.01"))
             order_no = f"PAYGRACE{days_ago:03d}{idx:02d}"
-            customer = (
-                EndUser.objects.filter(default_merchant=merchant, portal_role="customer", is_deleted=False)
-                .order_by("created_at")
-                .first()
-            )
             order = PaymentOrder.objects.create(
                 order_no=order_no,
                 merchant_order_no=f"GR-{days_ago:03d}-{idx:02d}",
                 unique_identification_no=f"UINGRACE{days_ago:03d}{idx:02d}",
-                merchant=merchant,
-                user_id=str(customer.id) if customer else "",
+                merchant=None,
+                agent=a1,
+                agent_customer=customer,
+                user_id="",
                 currency="USD",
                 amount=amount,
                 fee_amount=fee,
@@ -2060,7 +1903,7 @@ class Command(BaseCommand):
                 payment_order=order,
                 agent=a1,
                 order_no=order.order_no,
-                merchant_name=merchant.merchant_name,
+                merchant_name=customer.legal_name,
                 agent_name=a1.short_name,
                 bank_channel_name="JPM",
                 amount=amount,
@@ -2072,22 +1915,22 @@ class Command(BaseCommand):
             _stamp(share, created + timedelta(days=1, hours=4))
             fee_share_count += 1
 
-        # Extra approved deposits for Grace customers (funds narrative).
         collection = NostroAccount.objects.filter(account_type="COLLECTION").first()
         if collection:
-            for days_ago, merchant, amount, remark in (
-                (3, m5, Decimal("45000.00"), "Savannah working-capital top-up"),
-                (8, m6, Decimal("62000.00"), "Kilimanjaro corridor float"),
-                (16, m1, Decimal("78000.00"), "Horizon VA prefunding"),
+            for days_ago, amount, remark in (
+                (3, Decimal("45000.00"), "EastAfrica working-capital top-up"),
+                (8, Decimal("62000.00"), "Corridor float"),
+                (16, Decimal("78000.00"), "CURRENT prefunding"),
             ):
                 created = _at(days_ago, 11, 20)
                 dep = DepositRequest.objects.create(
                     deposit_no=f"DEPGRACE{days_ago:03d}",
-                    merchant=merchant,
+                    agent=a1,
                     account=collection,
                     currency="USD",
                     amount=amount,
                     status="APPROVED",
+                    source=DepositRequest.DepositSource.AGENT_SELF,
                     remark=remark,
                     reviewed_by="admin",
                     reviewed_at=created + timedelta(hours=1),
@@ -2096,22 +1939,26 @@ class Command(BaseCommand):
                 _stamp(dep, created, updated_at=created + timedelta(hours=1))
 
         self.stdout.write(
-            f"    Done: +2 merchants, +{len(new_users)} customers, "
-            f"+{fee_share_count} fee shares, VA boosts={va_boosted}"
+            f"    Done: +{len(new_customers)} customers, "
+            f"+{fee_share_count} fee shares, CURRENT boosts={va_boosted}"
         )
         return {
-            "merchants": 2,
-            "customers": len(new_users),
+            "merchants": 0,
+            "customers": len(new_customers),
             "fee_shares": fee_share_count,
             "va_boosted": va_boosted,
         }
 
-    def _create_demo_workflow_orders(self, merchants, agents, end_users):
-        """Showcase agent review → CapitalPay approve → bank waterfall payout."""
+    def _create_demo_workflow_orders(self, merchants, agents, end_users, customers):
+        """Agent-booked remittances go straight to CapitalPay review."""
         self.stdout.write("  Creating demo workflow remittance orders...")
-        m1, m2 = merchants[0], merchants[1]
-        customer_h = end_users[0]  # Daniel Ochieng under Grace / Horizon
-        customer_l = end_users[3]  # Chioma Eze under Adewale / Lagos Agro
+        m1 = merchants[0]
+        a1, a2 = agents[0], agents[1]
+        merchant_user = end_users[0]
+        agent_user_h = next(u for u in end_users if u.default_agent_id == a1.id)
+        agent_user_l = next(u for u in end_users if u.default_agent_id == a2.id)
+        horizon_c = next(c for c in customers if c.legal_name == "Horizon Trade Limited")
+        lagos_c = next(c for c in customers if c.legal_name == "Lagos Agro Commodities Ltd")
         created = _at(0, 9, 15)
         expire = created + timedelta(days=2)
         orders = []
@@ -2119,15 +1966,16 @@ class Command(BaseCommand):
         def _fee(amount):
             return (amount * Decimal("0.003")).quantize(Decimal("0.01"))
 
-        # Customer remittance waiting for agent agree (EastAfrica / Horizon).
         amount = Decimal("12500.00")
         fee = _fee(amount)
         o1 = PaymentOrder.objects.create(
             order_no="PAYDEMOAGENT01",
             merchant_order_no="HT-DEMO-AGENT-01",
             unique_identification_no="UINDEMOAGENT01",
-            merchant=m1,
-            user_id=str(customer_h.id),
+            merchant=None,
+            agent=a1,
+            agent_customer=horizon_c,
+            user_id=str(agent_user_h.id),
             currency="USD",
             amount=amount,
             fee_amount=fee,
@@ -2142,18 +1990,17 @@ class Command(BaseCommand):
             beneficiary_swift="COBADEFF",
             beneficiary_account="DE89370400440532013000",
             beneficiary_address="Werner-von-Siemens-Strasse 1, Munich",
-            remittance_purpose="Demo: awaiting agent review",
+            remittance_purpose="Demo: agent-booked remittance awaiting CapitalPay",
             pay_method="WIRE_TRANSFER",
-            status=PaymentOrder.OrderStatus.PENDING_AGENT_REVIEW,
-            agent_review_status=PaymentOrder.AgentReviewStatus.PENDING,
-            status_history=[{"status": "PENDING_AGENT_REVIEW", "time": created.isoformat()}],
+            status=PaymentOrder.OrderStatus.PENDING_REVIEW,
+            agent_review_status=PaymentOrder.AgentReviewStatus.NONE,
+            status_history=[{"status": "PENDING_REVIEW", "time": created.isoformat()}],
             expire_at=expire,
             idempotency_key=generate_idempotency_key("seed_demo_agent_"),
         )
         _stamp(o1, created)
         orders.append(o1)
 
-        # Agent-proxy remittance waiting for CapitalPay application approval.
         amount = Decimal("18600.50")
         fee = _fee(amount)
         o2 = PaymentOrder.objects.create(
@@ -2161,7 +2008,7 @@ class Command(BaseCommand):
             merchant_order_no="HT-DEMO-OPS-01",
             unique_identification_no="UINDEMOOPS01",
             merchant=m1,
-            user_id=str(customer_h.id),
+            user_id=str(merchant_user.id),
             currency="USD",
             amount=amount,
             fee_amount=fee,
@@ -2176,7 +2023,7 @@ class Command(BaseCommand):
             beneficiary_swift="BNPAFRPP",
             beneficiary_account="FR1420041010050500013M02606",
             beneficiary_address="35 rue Joseph Monier, Rueil-Malmaison",
-            remittance_purpose="Demo: awaiting CapitalPay approve",
+            remittance_purpose="Demo: independent merchant awaiting CapitalPay approve",
             pay_method="WIRE_TRANSFER",
             status=PaymentOrder.OrderStatus.PENDING_REVIEW,
             agent_review_status=PaymentOrder.AgentReviewStatus.NONE,
@@ -2187,19 +2034,17 @@ class Command(BaseCommand):
         _stamp(o2, created + timedelta(minutes=5))
         orders.append(o2)
 
-        # Approved by CapitalPay; ready for Confirm transfer / bank waterfall.
-        # Amount > ICBC usd_balance (4500) so cheapest bank is skipped → JPM recommended.
         amount = Decimal("9800.00")
         fee = _fee(amount)
         reviewed_at = created + timedelta(minutes=20)
-        demo_prn = generate_prn(agent=getattr(m1, "agent", None), on_date=timezone.localdate())
+        demo_prn = generate_prn(agent=None, on_date=timezone.localdate())
         o3 = PaymentOrder.objects.create(
             order_no="PAYDEMOPAYOUT01",
             merchant_order_no="HT-DEMO-PAYOUT-01",
             unique_identification_no="UINDEMOPAYOUT01",
             prn_code=demo_prn,
             merchant=m1,
-            user_id=str(customer_h.id),
+            user_id=str(merchant_user.id),
             currency="USD",
             amount=amount,
             fee_amount=fee,
@@ -2236,15 +2081,16 @@ class Command(BaseCommand):
         _stamp(o3, created + timedelta(minutes=10))
         orders.append(o3)
 
-        # Lagos customer remittance waiting for Sahel agent.
         amount = Decimal("7200.00")
         fee = _fee(amount)
         o4 = PaymentOrder.objects.create(
             order_no="PAYDEMOAGENT02",
             merchant_order_no="LA-DEMO-AGENT-01",
             unique_identification_no="UINDEMOAGENT02",
-            merchant=m2,
-            user_id=str(customer_l.id),
+            merchant=None,
+            agent=a2,
+            agent_customer=lagos_c,
+            user_id=str(agent_user_l.id),
             currency="USD",
             amount=amount,
             fee_amount=fee,
@@ -2259,11 +2105,11 @@ class Command(BaseCommand):
             beneficiary_swift="BOFAUS3N",
             beneficiary_account="9988776655",
             beneficiary_address="15407 McGinty Road West, Wayzata",
-            remittance_purpose="Demo: Lagos awaiting Sahel agent review",
+            remittance_purpose="Demo: Lagos agent-booked remittance awaiting CapitalPay",
             pay_method="WIRE_TRANSFER",
-            status=PaymentOrder.OrderStatus.PENDING_AGENT_REVIEW,
-            agent_review_status=PaymentOrder.AgentReviewStatus.PENDING,
-            status_history=[{"status": "PENDING_AGENT_REVIEW", "time": (created + timedelta(minutes=30)).isoformat()}],
+            status=PaymentOrder.OrderStatus.PENDING_REVIEW,
+            agent_review_status=PaymentOrder.AgentReviewStatus.NONE,
+            status_history=[{"status": "PENDING_REVIEW", "time": (created + timedelta(minutes=30)).isoformat()}],
             expire_at=expire,
             idempotency_key=generate_idempotency_key("seed_demo_agent2_"),
         )
@@ -2272,9 +2118,10 @@ class Command(BaseCommand):
 
         self.stdout.write(
             "    Done: 4 demo workflow orders "
-            "(2 agent-review, 1 CapitalPay review, 1 payout waterfall)"
+            "(2 agent-booked PENDING_REVIEW, 1 merchant review, 1 payout waterfall)"
         )
         return orders
+
 
     def _create_onboarding(self, end_users):
         self.stdout.write("  Creating pending KYC onboarding...")
@@ -2291,7 +2138,7 @@ class Command(BaseCommand):
             nickname=real_name,
             real_name=real_name,
             is_verified=False,
-            portal_role="customer",
+            portal_role="merchant",
             onboarding_status="pending",
             onboarding_submitted_at=_days_ago(2),
         )
@@ -2303,17 +2150,17 @@ class Command(BaseCommand):
             contact_phone=phone,
             nationality="Nigeria",
             address="14 Adeola Hopewell Street, Victoria Island, Lagos, Nigeria",
-            agent_code="AG20260002",
+            agent_code="",
             license_expiry_date=_days_ago(-400).date(),
             bank_name="Guaranty Trust Bank",
             branch_name="Victoria Island Branch",
             account_name=real_name,
             bank_account="0008899001",
-            agent_review_status=UserOnboarding.AgentReviewStatus.PENDING,
+            agent_review_status=UserOnboarding.AgentReviewStatus.NONE,
         )
         end_users.append(user)
         self.stdout.write(
-            f"    Done: 1 pending profile ({_gmail_display(real_name)} → Sahel agent KYC queue)"
+            f"    Done: 1 pending independent merchant profile ({_gmail_display(real_name)})"
         )
 
     def _create_exchange_rates(self):

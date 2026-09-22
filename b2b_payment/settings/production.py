@@ -34,10 +34,10 @@ CORS_ALLOWED_ORIGINS = [
 ]
 CORS_ALLOW_CREDENTIALS = True
 
-# Cashier / customer portal links embedded in backend responses
+# Cashier / merchant portal links embedded in backend responses
 CASHIER_BASE_URL = os.environ.get(
     "CASHIER_BASE_URL",
-    "/customer/pay",
+    "/merchant/pay",
 )
 
 # Require real secrets from environment in production

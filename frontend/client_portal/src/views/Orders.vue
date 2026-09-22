@@ -20,7 +20,7 @@
         <el-table-column prop="merchant_name" label="Customer" min-width="130" />
         <el-table-column label="Currency pair" width="110"><template #default="{ row }">{{ row.from_currency }}/{{ row.to_currency || row.currency }}</template></el-table-column>
         <el-table-column prop="amount" label="Amount" min-width="100" :formatter="formatMoneyCell" />
-        <el-table-column prop="fee_amount" label="Charges" min-width="90" :formatter="formatMoneyCell" />
+        <el-table-column prop="fee_amount" label="Remittance Fee" min-width="120" :formatter="formatMoneyCell" />
         <el-table-column label="Charge Bearer" min-width="280">
           <template #default="{ row }">{{ FEE_BEARING[row.fee_bearing] || row.fee_bearing || '—' }}</template>
         </el-table-column>
@@ -75,8 +75,20 @@
             <el-descriptions-item label="Principal Amount">
               {{ money(detail.amount) }} {{ detail.from_currency || detail.currency || '' }}
             </el-descriptions-item>
-            <el-descriptions-item label="Charges">
+            <el-descriptions-item label="Remittance Fee">
               {{ money(detail.fee_amount) }} {{ detail.fee_currency || detail.from_currency || '' }}
+            </el-descriptions-item>
+            <el-descriptions-item label="Bank Fee">
+              {{ formatOptionalMoney(detail.bank_fee, detail.fee_currency || detail.from_currency) }}
+            </el-descriptions-item>
+            <el-descriptions-item label="Remittance Profit">
+              {{ formatOptionalMoney(detail.remittance_profit, detail.fee_currency || detail.from_currency) }}
+            </el-descriptions-item>
+            <el-descriptions-item label="Agent Fee">
+              {{ formatOptionalMoney(detail.agent_fee, detail.fee_currency || detail.from_currency) }}
+            </el-descriptions-item>
+            <el-descriptions-item label="CapitalPay Profit">
+              {{ formatOptionalMoney(detail.capitalpay_profit, detail.fee_currency || detail.from_currency) }}
             </el-descriptions-item>
             <el-descriptions-item label="Charge Bearer">
               {{ FEE_BEARING[detail.fee_bearing] || detail.fee_bearing || '—' }}
@@ -113,7 +125,12 @@
             <el-descriptions-item label="Payment Method">
               {{ detail.pay_method_display || PAY_METHOD[detail.pay_method] || detail.pay_method || '—' }}
             </el-descriptions-item>
-            <el-descriptions-item label="Bank Code">{{ dash(detail.bank_code) }}</el-descriptions-item>
+            <el-descriptions-item label="Bank Code">
+              <template v-if="detail.payout_splits && detail.payout_splits.length > 1">
+                {{ detail.payout_splits.map((leg) => `${leg.bank_code} ${money(leg.amount)}`).join(' + ') }}
+              </template>
+              <template v-else>{{ dash(detail.bank_code) }}</template>
+            </el-descriptions-item>
             <el-descriptions-item label="Bank Transaction ID" :span="2">{{ dash(detail.bank_txn_id) }}</el-descriptions-item>
           </el-descriptions>
 
@@ -309,45 +326,62 @@
       </div>
     </el-drawer>
 
-    <el-dialog v-model="payoutVisible" title="Select payout bank" width="780px" destroy-on-close>
+    <el-dialog v-model="payoutVisible" title="Select payout bank" width="980px" destroy-on-close>
       <p class="payout-hint">
-        Banks are ranked by Fee Rule (lowest first). The first bank with sufficient balance is recommended.
+        Banks are ranked by Bank Fee (lowest first). Bank Fee is taken from Remittance Fee and must be lower.
+        If the cheapest bank's remaining balance cannot cover the payout, select it plus a second bank for the remainder.
       </p>
       <p v-if="payoutMeta.amount" class="payout-meta">
         Payout {{ money(payoutMeta.amount) }} {{ payoutMeta.currency }}
+        <template v-if="payoutMeta.remittanceFee !== '' && payoutMeta.remittanceFee != null">
+          · Remittance Fee {{ money(payoutMeta.remittanceFee) }} {{ payoutMeta.currency }}
+        </template>
       </p>
-      <el-radio-group v-model="payoutBankCode" class="payout-banks">
-        <el-table :data="payoutBanks" v-loading="payoutLoading" size="small">
-          <el-table-column label="" width="50">
-            <template #default="{ row }">
-              <el-radio :value="row.bank_code" :disabled="!row.sufficient" />
-            </template>
-          </el-table-column>
+      <p v-if="payoutSplitSummary" class="payout-split">{{ payoutSplitSummary }}</p>
+      <el-table :data="payoutBanks" v-loading="payoutLoading" size="small" class="payout-banks">
+        <el-table-column label="" width="50">
+          <template #default="{ row }">
+            <el-checkbox
+              :model-value="payoutBankCodes.includes(row.bank_code)"
+              :disabled="isPayoutBankDisabled(row, payoutBanks, payoutBankCodes, payoutMeta.amount)"
+              @change="(checked) => togglePayoutBank(row.bank_code, checked)"
+            />
+          </template>
+        </el-table-column>
         <el-table-column prop="bank_name" label="Bank" min-width="160" />
         <el-table-column prop="bank_code" label="Code" width="90" />
         <el-table-column label="Fee Rule" width="100">
           <template #default="{ row }">{{ feeRuleText(row.fee_rate) }}</template>
         </el-table-column>
-        <el-table-column label="Computed fee" width="120">
+        <el-table-column label="Bank Fee" width="120">
           <template #default="{ row }">{{ money(row.computed_fee) }}</template>
         </el-table-column>
         <el-table-column label="Balance" width="130">
           <template #default="{ row }">{{ money(row.balance) }} {{ row.currency }}</template>
         </el-table-column>
-        <el-table-column label="" width="130">
+        <el-table-column label="This payout" width="120">
+          <template #default="{ row }">
+            <template v-if="payoutLegAmount(row, payoutBanks, payoutBankCodes, payoutMeta.amount) !== ''">
+              {{ money(payoutLegAmount(row, payoutBanks, payoutBankCodes, payoutMeta.amount)) }}
+            </template>
+            <span v-else>—</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="" width="170">
           <template #default="{ row }">
             <el-tag v-if="row.recommended" type="success" size="small">Recommended</el-tag>
+            <el-tag v-else-if="row.partial" type="warning" size="small">Remaining {{ money(row.usable_amount || row.balance) }}</el-tag>
             <el-tag v-else-if="!row.sufficient" type="info" size="small">Insufficient</el-tag>
+            <el-tag v-else-if="!row.bank_fee_ok" type="warning" size="small">Fee too high</el-tag>
           </template>
         </el-table-column>
       </el-table>
-      </el-radio-group>
       <el-empty v-if="!payoutLoading && !payoutBanks.length" description="No active payout banks" />
       <template #footer>
         <el-button @click="payoutVisible = false">Cancel</el-button>
         <el-button
           type="primary"
-          :disabled="!payoutBankCode"
+          :disabled="!payoutCanSubmit"
           :loading="payoutSubmitting"
           @click="submitPayout"
         >Confirm transfer</el-button>
@@ -366,6 +400,14 @@ import EmptyState from '@/components/EmptyState.vue'
 import { getOrders, getOrderDetail, getOrderSanctionReview, reviewOrder, confirmPayment, confirmTransfer, getPayoutBanks, initiateOrderRefund } from '@/api/orders'
 import { getOrderStats } from '@/api/dashboard'
 import { unwrapList, datetime, money, PAY_METHOD, CURRENCIES, formatMoneyCell, FEE_BEARING } from '@/utils/format'
+import {
+  confirmTransferPayload,
+  isPayoutBankDisabled,
+  payoutLegAmount,
+  payoutSelectionComplete,
+  recommendedPayoutCodes,
+  splitPayoutLegs
+} from '@/utils/payoutBanks'
 import { useAuthStore } from '@/store/auth'
 
 const auth = useAuthStore()
@@ -386,13 +428,24 @@ const screening = ref(null)
 const payoutVisible = ref(false)
 const payoutLoading = ref(false)
 const payoutSubmitting = ref(false)
-const payoutBanks = ref([])
-const payoutBankCode = ref('')
 const payoutOrderNo = ref('')
-const payoutMeta = reactive({ amount: '', currency: '' })
+const payoutBanks = ref([])
+const payoutBankCodes = ref([])
+const payoutMeta = reactive({ amount: '', currency: '', remittanceFee: '' })
 const filters = reactive({ search: '', from_currency: '', to_currency: '' })
 const detailTitle = computed(() => detail.value?.order_no ? `Order ${detail.value.order_no}` : 'Order Details')
 const screeningTitle = computed(() => screening.value?.order_no ? `Screening ${screening.value.order_no}` : 'Screening')
+const payoutCanSubmit = computed(() => payoutSelectionComplete(
+  payoutBanks.value, payoutBankCodes.value, payoutMeta.amount,
+))
+const payoutSplitSummary = computed(() => {
+  const legs = splitPayoutLegs(payoutBanks.value, payoutBankCodes.value, payoutMeta.amount)
+  if (legs.length !== 2) return ''
+  const ccy = payoutMeta.currency
+  return legs
+    .map((leg) => `${leg.bank_code} ${money(leg.payout_amount)} ${ccy}`)
+    .join(' + ')
+})
 const kpis = computed(() => [
   { label: 'Awaiting operations review', value: stats.value.pending_review ?? 0 },
   { label: 'Awaiting funds', value: stats.value.pending_pay ?? 0 },
@@ -402,6 +455,22 @@ const kpis = computed(() => [
 function dash(value) {
   if (value === null || value === undefined || value === '') return '—'
   return value
+}
+
+function togglePayoutBank(code, checked) {
+  if (checked) {
+    if (!payoutBankCodes.value.includes(code)) {
+      payoutBankCodes.value = [...payoutBankCodes.value, code]
+    }
+    return
+  }
+  payoutBankCodes.value = payoutBankCodes.value.filter((item) => item !== code)
+}
+
+function formatOptionalMoney(value, currency) {
+  if (value === null || value === undefined || value === '') return '—'
+  const suffix = currency ? ` ${currency}` : ''
+  return `${money(value)}${suffix}`
 }
 
 function isAwaitingAgentPayout(row) {
@@ -527,9 +596,10 @@ async function doConfirmPayment(row) {
 async function doConfirmTransfer(row) {
   payoutOrderNo.value = row.order_no
   payoutBanks.value = []
-  payoutBankCode.value = ''
+  payoutBankCodes.value = []
   payoutMeta.amount = ''
   payoutMeta.currency = ''
+  payoutMeta.remittanceFee = ''
   payoutVisible.value = true
   payoutLoading.value = true
   try {
@@ -537,17 +607,18 @@ async function doConfirmTransfer(row) {
     payoutBanks.value = data.results || []
     payoutMeta.amount = data.amount || ''
     payoutMeta.currency = data.currency || ''
-    payoutBankCode.value = data.recommended_bank_code || ''
+    payoutMeta.remittanceFee = data.remittance_fee ?? ''
+    payoutBankCodes.value = recommendedPayoutCodes(data)
   } finally {
     payoutLoading.value = false
   }
 }
 
 async function submitPayout() {
-  if (!payoutOrderNo.value || !payoutBankCode.value) return
+  if (!payoutOrderNo.value || !payoutCanSubmit.value) return
   payoutSubmitting.value = true
   try {
-    await confirmTransfer(payoutOrderNo.value, { bank_code: payoutBankCode.value })
+    await confirmTransfer(payoutOrderNo.value, confirmTransferPayload(payoutBankCodes.value))
     ElMessage.success('The transfer has been confirmed.')
     payoutVisible.value = false
     load()
@@ -597,6 +668,11 @@ onMounted(load)
 .payout-banks {
   display: block;
   width: 100%;
+}
+.payout-split {
+  margin: 0 0 12px;
+  font-size: 13px;
+  color: #3d3d3d;
 }
 .awaiting-payout {
   display: inline-block;

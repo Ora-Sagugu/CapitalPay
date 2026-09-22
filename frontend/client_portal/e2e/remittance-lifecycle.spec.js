@@ -13,12 +13,12 @@ test('two-stage review activates merchant and submits a quoted remittance', asyn
   const password = 'E2ePass@123'
 
   const registration = await expectOk(await request.post('/api/v1/user/auth/register-email/', {
-    data: { username, email, password, portal_role: 'customer' }
+    data: { username, email, password, portal_role: 'merchant' }
   }))
-  const customerToken = registration.token
+  const merchantToken = registration.token
 
   await expectOk(await request.post('/api/v1/user/onboarding/submit/', {
-    headers: { Authorization: `Bearer ${customerToken}` },
+    headers: { Authorization: `Bearer ${merchantToken}` },
     data: {
       basic: {
         legal_name: `E2E Trading ${suffix}`,
@@ -51,16 +51,30 @@ test('two-stage review activates merchant and submits a quoted remittance', asyn
 
   const pendingList = await expectOk(await request.get('/api/v1/admin/onboarding/', {
     headers: adminHeaders,
-    params: { status: 'pending', search: username }
+    params: { status: 'pending', search: username, portal_role: 'merchant' }
   }))
   const pendingUser = pendingList.results.find((item) => item.username === username)
   expect(pendingUser).toBeTruthy()
+
+  await expectOk(await request.post(
+    `/api/v1/admin/onboarding/${pendingUser.id}/start-review/`,
+    { headers: adminHeaders }
+  ))
 
   const initialReview = await expectOk(await request.post(
     `/api/v1/admin/onboarding/${pendingUser.id}/review/`,
     {
       headers: adminHeaders,
-      data: { action: 'approve', remark: 'Playwright initial review' }
+      data: {
+        action: 'approve',
+        remark: 'Playwright initial review',
+        risk_level: 'MEDIUM',
+        enable_wire_transfer: true,
+        fee_model: 'PERCENTAGE',
+        fee_rate: '0.003',
+        fixed_fee: '0',
+        min_fee: '0'
+      }
     }
   ))
   expect(initialReview.next_stage).toBe('ACTIVE')
@@ -69,14 +83,20 @@ test('two-stage review activates merchant and submits a quoted remittance', asyn
   expect(initialReview.merchant_no).toBeTruthy()
 
   const profile = await expectOk(await request.get('/api/v1/user/profile/me/', {
-    headers: { Authorization: `Bearer ${customerToken}` }
+    headers: { Authorization: `Bearer ${merchantToken}` }
   }))
   expect(profile.activation_stage).toBe('ACTIVE')
   expect(profile.remittance_eligibility.eligible).toBe(true)
 
+  const buyer = await expectOk(await request.post('/api/v1/user/customers/', {
+    headers: { Authorization: `Bearer ${merchantToken}` },
+    data: { legal_name: `E2E Buyer ${suffix}` }
+  }))
+
   const quote = await expectOk(await request.post('/api/v1/user/payments/quote/', {
-    headers: { Authorization: `Bearer ${customerToken}` },
+    headers: { Authorization: `Bearer ${merchantToken}` },
     data: {
+      customer_id: buyer.id,
       amount: '100',
       from_currency: 'USD',
       to_currency: 'USD',
@@ -88,10 +108,11 @@ test('two-stage review activates merchant and submits a quoted remittance', asyn
 
   const order = await expectOk(await request.post('/api/v1/user/payments/apply/', {
     headers: {
-      Authorization: `Bearer ${customerToken}`,
+      Authorization: `Bearer ${merchantToken}`,
       'Idempotency-Key': `e2e-${suffix}`
     },
     data: {
+      customer_id: buyer.id,
       quote_id: quote.quote_id,
       beneficiary_name: 'E2E Supplier',
       beneficiary_bank: 'Supplier Bank',
@@ -107,7 +128,7 @@ test('two-stage review activates merchant and submits a quoted remittance', asyn
   await page.addInitScript(({ token, user }) => {
     localStorage.setItem('token', token)
     localStorage.setItem('user', JSON.stringify(user))
-  }, { token: customerToken, user: registration.user })
+  }, { token: merchantToken, user: registration.user })
   await page.goto('http://127.0.0.1:1030/orders')
   await expect(page.getByText(order.order_no)).toBeVisible()
 })

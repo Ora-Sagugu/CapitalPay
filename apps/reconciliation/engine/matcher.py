@@ -288,13 +288,16 @@ class ReconciliationMatcher:
                 PaymentOrder.OrderStatus.PENDING_SETTLE,
                 PaymentOrder.OrderStatus.SETTLED,
             ],
-        ).only("order_no", "bank_txn_id", "amount", "pay_received_at", "prn_code")
+        ).only(
+            "order_no", "bank_txn_id", "amount", "sender_total_amount",
+            "pay_received_at", "prn_code",
+        )
 
         return [
             PlatformOrderLine(
                 order_no=o.order_no,
                 bank_txn_id=o.bank_txn_id,
-                amount=o.amount,
+                amount=o.expected_collection_amount(),
                 pay_received_at=o.pay_received_at,
                 prn_code=o.prn_code,
             )

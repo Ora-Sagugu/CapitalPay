@@ -1,10 +1,20 @@
-"""Wipe business / demo data while preserving SanctionList (OFAC/UN)."""
+"""Wipe business / demo data while preserving selected platform config."""
 
 from __future__ import annotations
 
 
-def wipe_business_data(*, keep_risk_rating_limits: bool = False, clear_framework_ephemera: bool = False) -> None:
+def wipe_business_data(
+    *,
+    keep_risk_rating_limits: bool = False,
+    keep_channels: bool = False,
+    keep_ops_accounts: bool = False,
+    clear_framework_ephemera: bool = False,
+) -> None:
     """Delete transactional and config rows. Never deletes SanctionList.
+
+    Optional preserves:
+    - keep_channels: BankChannel + RoutingRule (ops Channels config)
+    - keep_ops_accounts: SystemUser / Role / Permission / RolePermission / UserRole
 
     QuerySet.delete() is required for MoneyMovement/AuditLog (instance delete is blocked).
     Delete order respects PROTECT foreign keys.
@@ -23,7 +33,7 @@ def wipe_business_data(*, keep_risk_rating_limits: bool = False, clear_framework
         VirtualAccount,
     )
     from apps.adjustment.models import AdjustmentApplication, AdjustmentApproval
-    from apps.agent.models import Agent, AgentCommission, AgentKYC, AgentMerchant
+    from apps.agent.models import Agent, AgentCommission, AgentCustomer, AgentKYC, AgentMerchant
     from apps.compliance.models import SanctionHitDetail, SanctionScanRecord
     from apps.core.models import AuditLog
     from apps.exchange.models import ExchangeRate
@@ -45,6 +55,7 @@ def wipe_business_data(*, keep_risk_rating_limits: bool = False, clear_framework
     )
     from apps.payment.models import (
         BankCreditNotification,
+        AgentDailyRemittanceUsage,
         MerchantDailyRemittanceUsage,
         PaymentOrder,
         PRNConfig,
@@ -101,6 +112,7 @@ def wipe_business_data(*, keep_risk_rating_limits: bool = False, clear_framework
         PrnIssuance,
         PaymentOrder,
         RemittanceQuote,
+        AgentDailyRemittanceUsage,
         MerchantDailyRemittanceUsage,
         RefundFeeConfig,
         PRNConfig,
@@ -115,6 +127,7 @@ def wipe_business_data(*, keep_risk_rating_limits: bool = False, clear_framework
         ExchangeRate,
         AgentCommission,
         AgentMerchant,
+        AgentCustomer,
         AgentKYC,
         MerchantPaymentProduct,
         MerchantSettlementAccount,
@@ -128,19 +141,16 @@ def wipe_business_data(*, keep_risk_rating_limits: bool = False, clear_framework
         FeeModel,
         CoopBank,
         RemittanceFeeConfig,
-        RoutingRule,
-        BankChannel,
-        UserRole,
-        RolePermission,
         OperationLog,
-        SystemUser,
-        Role,
-        Permission,
         RefreshToken,
         SmsCode,
         UserOnboarding,
         EndUser,
     ]
+    if not keep_channels:
+        models.extend([RoutingRule, BankChannel])
+    if not keep_ops_accounts:
+        models.extend([UserRole, RolePermission, SystemUser, Role, Permission])
     if not keep_risk_rating_limits:
         models.append(RiskRatingLimit)
 

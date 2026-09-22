@@ -61,14 +61,19 @@ export const FEE_BEARING = {
 }
 export const ROLE_NAME = {
   super_admin: 'Super Admin',
-  maker: 'Maker',
-  checker: 'Checker',
-  authoriser: 'Authoriser',
-  operator: 'Maker',
-  reviewer: 'Checker',
-  approver: 'Authoriser',
+  merchant_ops: 'Merchant Ops',
+  compliance: 'Compliance / Risk',
+  finance: 'Finance',
+  support: 'Customer Support',
+  analyst: 'Analyst / Read-only',
+  maker: 'Merchant Ops',
+  checker: 'Compliance / Risk',
+  authoriser: 'Finance',
+  operator: 'Merchant Ops',
+  reviewer: 'Compliance / Risk',
+  approver: 'Finance',
   agent: 'Agent',
-  customer: 'Customer'
+  customer: 'Merchant'
 }
 
 export function statusLabel(map, code) {
@@ -91,7 +96,7 @@ const MONEY_FIELD_KEYS = new Set([
   'commission_amount', 'amount_bank', 'amount_platform', 'daily_limit',
   'max_single_amount', 'platform_balance', 'bank_statement_balance',
   'total_refund_amount', 'net_amount', 'settled_amount', 'difference',
-  'usd_balance', 'hkd_balance', 'cny_balance', 'ledger_balance',
+  'usd_balance', 'hkd_balance', 'cny_balance', 'balance', 'ledger_balance',
   'available_balance', 'master_balance', 'virtual_accounts_total'
 ])
 

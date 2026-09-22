@@ -530,14 +530,14 @@ def breakdowns(filters: dict) -> dict:
 
 
 def serialize_order(order: PaymentOrder) -> dict:
-    agent = getattr(order.merchant, "agent", None) if order.merchant_id else None
+    agent = order.agent or (getattr(order.merchant, "agent", None) if order.merchant_id else None)
     return {
         "order_no": order.order_no,
         "merchant_order_no": order.merchant_order_no or "",
         "prn_code": order.prn_code or "",
         "unique_identification_no": order.unique_identification_no or "",
         "merchant_id": str(order.merchant_id) if order.merchant_id else "",
-        "merchant_name": order.merchant.merchant_name if order.merchant else "",
+        "merchant_name": order.party_name,
         "agent_id": str(agent.id) if agent else "",
         "agent_name": agent.agent_name if agent else "",
         "user_id": order.user_id or "",

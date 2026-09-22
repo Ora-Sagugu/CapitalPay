@@ -1,6 +1,6 @@
 <template>
   <div>
-    <PageHeader title="Deposits" subtitle="Customer deposit (credit) applications" />
+    <PageHeader title="Deposits" subtitle="Merchant deposit (credit) applications" />
     <KpiCards :items="kpis" />
     <div class="page-card">
       <div class="toolbar">
@@ -17,9 +17,9 @@
       <el-table :data="rows" v-loading="loading">
         <el-table-column prop="deposit_no" label="Deposit reference" min-width="150" />
         <el-table-column label="Source" min-width="120">
-          <template #default="{ row }">{{ row.source === 'AGENT_SELF' ? 'Agent' : 'Customer' }}</template>
+          <template #default="{ row }">{{ row.source === 'AGENT_SELF' ? 'Agent' : 'Merchant' }}</template>
         </el-table-column>
-        <el-table-column prop="merchant_name" label="Customer name" min-width="140" />
+        <el-table-column prop="merchant_name" label="Merchant name" min-width="140" />
         <el-table-column prop="agent_name" label="Agent" min-width="140" />
         <el-table-column prop="account_no" label="Linked account" min-width="140" />
         <el-table-column prop="currency" label="Currency" min-width="110" />
@@ -40,7 +40,7 @@
     </div>
     <el-dialog v-model="visible" title="Create deposit transfer" width="480px">
       <el-form :model="form" label-width="100px">
-        <el-form-item label="Customer">
+        <el-form-item label="Merchant">
           <el-select v-model="form.merchant" filterable style="width: 100%">
             <el-option v-for="m in merchants" :key="m.id" :label="m.merchant_name" :value="m.id" />
           </el-select>

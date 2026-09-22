@@ -1,8 +1,10 @@
 <template>
   <div>
-    <PageHeader title="Roles" subtitle-key="pages.roles.subtitle" />
+    <PageHeader title="Roles" subtitle-key="pages.roles.subtitle">
+      <el-button type="primary" @click="openCreate">{{ $t('pages.roles.newRole') }}</el-button>
+    </PageHeader>
     <el-row :gutter="12" class="role-grid">
-      <el-col v-for="card in roles" :key="card.code" :xs="24" :sm="12" :md="6">
+      <el-col v-for="card in roles" :key="card.code" :xs="24" :sm="12" :md="8" :lg="6">
         <button
           type="button"
           class="role-card"
@@ -48,25 +50,68 @@
         </div>
       </div>
     </div>
+
+    <el-dialog v-model="createVisible" :title="$t('pages.roles.newRole')" width="480px" @closed="resetCreate">
+      <el-form :model="createForm" label-width="110px" @submit.prevent>
+        <el-form-item :label="$t('pages.roles.roleName')" required>
+          <el-input
+            v-model="createForm.name"
+            maxlength="64"
+            @input="onNameInput"
+          />
+        </el-form-item>
+        <el-form-item :label="$t('pages.roles.roleCode')" required>
+          <el-input
+            v-model="createForm.code"
+            maxlength="64"
+            @input="codeTouched = true"
+          />
+        </el-form-item>
+        <el-form-item :label="$t('pages.roles.roleDescription')">
+          <el-input v-model="createForm.description" type="textarea" :rows="3" maxlength="256" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="createVisible = false">{{ $t('common.cancel') }}</el-button>
+        <el-button type="primary" :loading="creating" @click="create">{{ $t('common.save') }}</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { ElMessage } from 'element-plus'
 import PageHeader from '@/components/PageHeader.vue'
-import { getFunctions, setRoleCapabilities } from '@/api/rbac'
+import { createRole, getFunctions, setRoleCapabilities } from '@/api/rbac'
 
 const { t } = useI18n()
 const roles = ref([])
 const groups = ref([])
 const loading = ref(false)
 const saving = ref(false)
+const creating = ref(false)
+const createVisible = ref(false)
 const selectedCode = ref('super_admin')
+const codeTouched = ref(false)
+const createForm = reactive({
+  name: '',
+  code: '',
+  description: ''
+})
 
 const selectedRole = computed(() => roles.value.find((r) => r.code === selectedCode.value) || null)
 const selectedCodes = computed(() => new Set(selectedRole.value?.capability_codes || []))
+
+function slugifyCode(name) {
+  return String(name || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 64)
+}
 
 function isChecked(code) {
   if (selectedRole.value?.locked) return true
@@ -84,6 +129,46 @@ async function load() {
     }
   } finally {
     loading.value = false
+  }
+}
+
+function openCreate() {
+  resetCreate()
+  createVisible.value = true
+}
+
+function resetCreate() {
+  Object.assign(createForm, { name: '', code: '', description: '' })
+  codeTouched.value = false
+}
+
+function onNameInput() {
+  if (!codeTouched.value) {
+    createForm.code = slugifyCode(createForm.name)
+  }
+}
+
+async function create() {
+  const name = String(createForm.name || '').trim()
+  const code = String(createForm.code || '').trim()
+  const description = String(createForm.description || '').trim()
+  if (!name) {
+    ElMessage.warning(t('pages.roles.nameRequired'))
+    return
+  }
+  if (!code) {
+    ElMessage.warning(t('pages.roles.codeRequired'))
+    return
+  }
+  creating.value = true
+  try {
+    const created = await createRole({ name, code, description })
+    ElMessage.success(t('pages.roles.created', { role: created.name || name }))
+    createVisible.value = false
+    selectedCode.value = created.code || code
+    await load()
+  } finally {
+    creating.value = false
   }
 }
 

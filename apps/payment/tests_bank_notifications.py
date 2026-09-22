@@ -34,6 +34,7 @@ class BankCreditNotificationServiceTests(TestCase):
             from_currency="USD",
             to_currency="CNY",
             fee_amount=Decimal("32.00"),
+            sender_total_amount=Decimal("10032.00"),
             settle_amount=Decimal("9968.00"),
             status=PaymentOrder.OrderStatus.PENDING_PAY,
             pay_method=PaymentOrder.PayMethod.WIRE_TRANSFER,
@@ -43,7 +44,7 @@ class BankCreditNotificationServiceTests(TestCase):
 
     def test_match_prn_from_remark(self):
         note = ingest_credit(
-            amount="10000.00",
+            amount="10032.00",
             currency="usd",
             remark="please credit PRN:A25503",
         )
@@ -57,6 +58,15 @@ class BankCreditNotificationServiceTests(TestCase):
         self.order.refresh_from_db()
         self.assertEqual(self.order.status, PaymentOrder.OrderStatus.PENDING_PAY)
 
+    def test_principal_only_credit_is_mismatch(self):
+        note = ingest_credit(
+            amount="10000.00",
+            currency="USD",
+            prn_code="A25503",
+        )
+        self.assertEqual(note.status, BankCreditNotification.Status.MISMATCH)
+        self.assertEqual(note.order_id, self.order.id)
+
     def test_amount_mismatch(self):
         note = ingest_credit(
             amount=Decimal("9999.00"),
@@ -65,6 +75,30 @@ class BankCreditNotificationServiceTests(TestCase):
         )
         self.assertEqual(note.status, BankCreditNotification.Status.MISMATCH)
         self.assertEqual(note.order_id, self.order.id)
+
+    def test_our_fee_credit_matches_sender_total(self):
+        """OUR remittance: bank must credit principal + remittance fee (e.g. 100 + 1.1)."""
+        self.order.amount = Decimal("100.00")
+        self.order.fee_amount = Decimal("1.10")
+        self.order.sender_total_amount = Decimal("101.10")
+        self.order.save(update_fields=["amount", "fee_amount", "sender_total_amount", "updated_at"])
+
+        matched = ingest_credit(
+            amount="101.10",
+            currency="USD",
+            prn_code="A25503",
+            txn_id="BNK-FEE-101",
+        )
+        self.assertEqual(matched.status, BankCreditNotification.Status.MATCHED)
+        self.assertEqual(matched.amount, Decimal("101.10"))
+
+        principal_only = ingest_credit(
+            amount="100.00",
+            currency="USD",
+            prn_code="A25503",
+            txn_id="BNK-FEE-100",
+        )
+        self.assertEqual(principal_only.status, BankCreditNotification.Status.MISMATCH)
 
     def test_unknown_prn_is_unmatched(self):
         note = ingest_credit(
@@ -87,7 +121,7 @@ class BankCreditNotificationServiceTests(TestCase):
 
     def test_same_txn_id_is_idempotent(self):
         first = ingest_credit(
-            amount="10000.00",
+            amount="10032.00",
             currency="USD",
             prn_code="A25503",
             txn_id="BNK-DUP-1",
@@ -100,12 +134,12 @@ class BankCreditNotificationServiceTests(TestCase):
         )
         self.assertEqual(first.id, second.id)
         self.assertEqual(BankCreditNotification.objects.filter(txn_id="BNK-DUP-1").count(), 1)
-        self.assertEqual(Decimal(second.amount), Decimal("10000.00"))
+        self.assertEqual(Decimal(second.amount), Decimal("10032.00"))
 
     def test_simulate_fills_amount_from_order(self):
         note = simulate_credit({"prn_code": "A25503"})
         self.assertEqual(note.status, BankCreditNotification.Status.MATCHED)
-        self.assertEqual(note.amount, Decimal("10000.00"))
+        self.assertEqual(note.amount, Decimal("10032.00"))
         self.assertEqual(note.currency, "USD")
         self.assertEqual(note.source, BankCreditNotification.Source.MOCK)
 
@@ -126,6 +160,7 @@ class BankCreditNotificationApiTests(TestCase):
             from_currency="USD",
             to_currency="EUR",
             fee_amount=Decimal("2.00"),
+            sender_total_amount=Decimal("252.00"),
             settle_amount=Decimal("248.00"),
             status=PaymentOrder.OrderStatus.PENDING_PAY,
             pay_method=PaymentOrder.PayMethod.WIRE_TRANSFER,
@@ -173,7 +208,7 @@ class BankCreditNotificationApiTests(TestCase):
         )
         self.assertEqual(detail.status_code, 200)
         self.assertEqual(detail.data["order_status"], PaymentOrder.OrderStatus.PENDING_PAY)
-        self.assertEqual(detail.data["expected_amount"], "250.00")
+        self.assertEqual(detail.data["expected_amount"], "252.00")
 
         stats = self.client.get("/api/v1/admin/bank-notifications/stats/")
         self.assertEqual(stats.status_code, 200)

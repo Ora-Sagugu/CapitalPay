@@ -10,7 +10,7 @@
           <el-option label="Rejected" value="rejected" />
         </el-select>
         <el-button @click="load">Search</el-button>
-        <el-button type="primary" @click="visible = true">Create ledger adjustment</el-button>
+        <el-button v-if="canApprove" type="primary" @click="visible = true">Create ledger adjustment</el-button>
       </div>
       <el-table :data="rows" v-loading="loading">
         <el-table-column prop="application_no" label="Application no." min-width="150" />

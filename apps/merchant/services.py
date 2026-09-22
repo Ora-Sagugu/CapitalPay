@@ -360,8 +360,6 @@ class MerchantService:
             product_type=MerchantFee.ProductType.WIRE_TRANSFER,
             defaults={
                 "is_enabled": True,
-                "max_single_amount": review_data.get("max_single_amount"),
-                "daily_limit": review_data.get("daily_limit"),
                 "is_deleted": False,
             },
         )
@@ -534,8 +532,6 @@ class MerchantService:
             product_type=product_data["product_type"],
             defaults={
                 "is_enabled": product_data.get("is_enabled", True),
-                "max_single_amount": product_data.get("max_single_amount"),
-                "daily_limit": product_data.get("daily_limit"),
             },
         )
         return product

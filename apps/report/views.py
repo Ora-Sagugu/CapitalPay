@@ -52,6 +52,9 @@ class RemittanceReportViewSet(RequiresFeature, viewsets.ViewSet):
     """汇款业务报表 — 查询 & 导出。"""
     permission_classes = [IsAuthenticated, IsSystemUser]
     feature_code = "feature:reports"
+    ACTION_FEATURES = {
+        "export_remittance": "feature:reports.export",
+    }
 
     @action(detail=False, methods=["post"], url_path="query")
     def query_remittance(self, request):
@@ -401,6 +404,9 @@ class ReportQueryExportMixin(RequiresFeature):
     date_field = "report_date"
     permission_classes = [IsAuthenticated, IsSystemUser]
     feature_code = "feature:reports"
+    ACTION_FEATURES = {
+        "export": "feature:reports.export",
+    }
 
     def _report_queryset(self, request):
         from django.core.exceptions import FieldError
@@ -543,6 +549,9 @@ class PaymentAnalyticsViewSet(RequiresFeature, viewsets.ViewSet):
 
     permission_classes = [IsAuthenticated, IsSystemUser]
     feature_code = "feature:reports"
+    ACTION_FEATURES = {
+        "export": "feature:reports.export",
+    }
 
     def _filters(self, request):
         payload = request.query_params if request.method == "GET" else request.data

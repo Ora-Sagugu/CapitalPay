@@ -381,7 +381,7 @@ def build_slide2(prs: Presentation) -> None:
         "Merchant HMAC API",
         "Agent PRN API",
         "Ops Portal  Vue :1025",
-        "Agent :1026 / Customer :1027",
+        "Agent :1026 / Merchant :1027",
         "Public Cashier",
     ]
     client_boxes = []
@@ -503,7 +503,7 @@ def build_slide2(prs: Presentation) -> None:
         Inches(12.7),
         Inches(0.32),
         "Auth   ·   /api/v1/ HMAC-SHA256 (merchant + agent PRN)     "
-        "/api/v1/admin/ JWT (ops)     /api/v1/user/ JWT (customer & agent portal)     "
+        "/api/v1/admin/ JWT (ops)     /api/v1/user/ JWT (merchant & agent portal)     "
         "/api/v1/cashier/ public order page",
         size=11,
         bold=False,

@@ -1,23 +1,23 @@
 <template>
   <div>
-    <PageHeader title="Channels" subtitle="Bank accounts, balances and remittance channels">
+    <PageHeader title="Channels" subtitle="Each bank channel has a unique account number, one currency balance and remittance rails">
       <el-button type="primary" @click="openCreate">+ Create</el-button>
     </PageHeader>
     <KpiCards :items="kpis" />
     <div class="page-card">
       <div class="toolbar">
-        <el-input v-model="search" placeholder="Search by bank name" clearable style="width: 220px" @keyup.enter="load" />
+        <el-input v-model="search" placeholder="Search by bank name or account no." clearable style="width: 260px" @keyup.enter="load" />
         <el-button @click="load">Refresh</el-button>
       </div>
       <el-table :data="rows" v-loading="loading" class="banks-table" style="width: 100%" table-layout="fixed">
         <el-table-column prop="bank_name" label="Bank Name" min-width="180" show-overflow-tooltip />
-        <el-table-column prop="bank_code" label="Bank Code" min-width="120" show-overflow-tooltip />
-        <el-table-column prop="country" label="Country" min-width="160" />
-        <el-table-column label="Fee Rule" min-width="160">
-          <template #default="{ row }">{{ feeRuleText(row.fee_rate) }}</template>
+        <el-table-column prop="bank_code" label="Bank Code" min-width="110" show-overflow-tooltip />
+        <el-table-column prop="country" label="Country" min-width="140" />
+        <el-table-column label="Fee Rule" min-width="180">
+          <template #default="{ row }">{{ feeRuleText(row) }}</template>
         </el-table-column>
-        <el-table-column label="Balances" min-width="160">
-          <template #default="{ row }">{{ balancesText(row) }}</template>
+        <el-table-column label="Balance" min-width="150">
+          <template #default="{ row }">{{ balanceText(row) }}</template>
         </el-table-column>
         <el-table-column label="Actions" width="140">
           <template #default="{ row }">
@@ -32,17 +32,16 @@
         <el-descriptions title="Identity" :column="1" border>
           <el-descriptions-item label="Bank Code">{{ dash(detail.bank_code) }}</el-descriptions-item>
           <el-descriptions-item label="Bank name">{{ dash(detail.bank_name) }}</el-descriptions-item>
+          <el-descriptions-item label="Account No.">{{ dash(detail.account_number) }}</el-descriptions-item>
           <el-descriptions-item label="Country">{{ dash(detail.country) }}</el-descriptions-item>
           <el-descriptions-item label="Channel type">{{ channelTypeLabel(detail.channel_type) }}</el-descriptions-item>
         </el-descriptions>
-        <el-descriptions title="Balances" :column="1" border style="margin-top: 16px">
-          <el-descriptions-item label="USD">{{ money(detail.usd_balance) }}</el-descriptions-item>
-          <el-descriptions-item label="HKD">{{ money(detail.hkd_balance) }}</el-descriptions-item>
-          <el-descriptions-item label="CNY">{{ money(detail.cny_balance) }}</el-descriptions-item>
+        <el-descriptions title="Balance" :column="1" border style="margin-top: 16px">
+          <el-descriptions-item label="Currency">{{ dash(detail.currency) }}</el-descriptions-item>
+          <el-descriptions-item label="Balance">{{ money(detail.balance) }}</el-descriptions-item>
         </el-descriptions>
         <el-descriptions title="Fees & limits" :column="1" border style="margin-top: 16px">
-          <el-descriptions-item label="Fee Rule">{{ feeRuleText(detail.fee_rate) }}</el-descriptions-item>
-          <el-descriptions-item label="Min fee">{{ money(detail.min_fee) }}</el-descriptions-item>
+          <el-descriptions-item label="Fee Rule">{{ feeRuleText(detail) }}</el-descriptions-item>
           <el-descriptions-item label="Max fee">{{ money(detail.max_fee) }}</el-descriptions-item>
           <el-descriptions-item label="Daily limit">{{ money(detail.daily_limit) }}</el-descriptions-item>
         </el-descriptions>
@@ -50,7 +49,6 @@
           <el-descriptions-item label="Priority">{{ dash(detail.priority) }}</el-descriptions-item>
           <el-descriptions-item label="Success rate">{{ dash(detail.success_rate) }}</el-descriptions-item>
           <el-descriptions-item label="Avg response time">{{ responseTime(detail.avg_response_time) }}</el-descriptions-item>
-          <el-descriptions-item label="Supported currencies">{{ listText(detail.supported_currencies) }}</el-descriptions-item>
           <el-descriptions-item label="Supported countries">{{ listText(detail.supported_countries) }}</el-descriptions-item>
         </el-descriptions>
         <el-descriptions title="Ops" :column="1" border style="margin-top: 16px">
@@ -75,11 +73,22 @@
       </div>
     </el-drawer>
     <el-dialog v-model="visible" :title="form.id ? 'Edit channel' : 'Create channel'" width="520px">
-      <el-form :model="form" label-width="110px">
-        <el-form-item label="Bank Code"><el-input v-model="form.bank_code" /></el-form-item>
-        <el-form-item label="Bank name"><el-input v-model="form.bank_name" /></el-form-item>
+      <el-form :model="form" label-width="120px">
+        <el-form-item label="Bank Code" required><el-input v-model="form.bank_code" /></el-form-item>
+        <el-form-item label="Bank name" required><el-input v-model="form.bank_name" /></el-form-item>
+        <el-form-item label="Account No." required>
+          <el-input
+            v-model="form.account_number"
+            placeholder="Digits, e.g. 6222021234567890 (IBAN may include letters)"
+          />
+        </el-form-item>
         <el-form-item label="Country"><el-input v-model="form.country" /></el-form-item>
-        <el-form-item label="Fee rate"><el-input v-model="form.fee_rate" /></el-form-item>
+        <el-form-item label="Fee rate">
+          <el-input v-model="form.fee_rate" placeholder="e.g. 0.0008 for 0.08%" />
+        </el-form-item>
+        <el-form-item label="Max fee">
+          <el-input v-model="form.max_fee" placeholder="e.g. 20.00" />
+        </el-form-item>
       </el-form>
       <template #footer>
         <el-button @click="visible = false">Cancel</el-button>
@@ -110,7 +119,15 @@ const stats = ref({})
 const loading = ref(false)
 const search = ref('')
 const visible = ref(false)
-const form = reactive({ id: '', bank_code: '', bank_name: '', country: '', fee_rate: '0.001' })
+const form = reactive({
+  id: '',
+  bank_code: '',
+  bank_name: '',
+  account_number: '',
+  country: '',
+  fee_rate: '0.001',
+  max_fee: '500.00'
+})
 const detailVisible = ref(false)
 const detailLoading = ref(false)
 const detail = reactive({})
@@ -127,7 +144,9 @@ function dash(value) {
   if (value === null || value === undefined || value === '') return '—'
   return value
 }
-function feeRuleText(rate) {
+function feeRuleText(rowOrRate) {
+  const rate = rowOrRate && typeof rowOrRate === 'object' ? rowOrRate.fee_rate : rowOrRate
+  const maxFee = rowOrRate && typeof rowOrRate === 'object' ? rowOrRate.max_fee : null
   if (rate === null || rate === undefined || rate === '') return '—'
   const n = Number(rate)
   if (Number.isNaN(n)) return '—'
@@ -136,6 +155,10 @@ function feeRuleText(rate) {
     minimumFractionDigits: 0,
     maximumFractionDigits: 4
   })
+  const maxN = Number(maxFee)
+  if (!Number.isNaN(maxN) && maxN > 0) {
+    return `${formatted}% · max ${money(maxFee)}`
+  }
   return `${formatted}%`
 }
 function listText(value) {
@@ -154,13 +177,12 @@ function compactAmount(n) {
   if (Number.isInteger(n) || n % 1 === 0) return String(Math.round(n))
   return n.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 2 })
 }
-function balancesText(row) {
-  const parts = []
-  for (const [prefix, key] of [['$', 'usd_balance'], ['HK$', 'hkd_balance'], ['¥', 'cny_balance']]) {
-    const n = Number(row?.[key])
-    if (!Number.isNaN(n) && n !== 0) parts.push(`${prefix}${compactAmount(n)}`)
-  }
-  return parts.length ? parts.join(' · ') : '—'
+function balanceText(row) {
+  const n = Number(row?.balance)
+  if (Number.isNaN(n)) return '—'
+  const ccy = String(row?.currency || '').toUpperCase()
+  const prefix = ccy === 'USD' ? '$' : ccy === 'HKD' ? 'HK$' : ccy === 'CNY' ? '¥' : (ccy ? `${ccy} ` : '')
+  return `${prefix}${compactAmount(n)}`
 }
 
 async function load() {
@@ -171,8 +193,30 @@ async function load() {
     rows.value = unwrapList(data).rows
   } finally { loading.value = false }
 }
-function openCreate() { Object.assign(form, { id: '', bank_code: '', bank_name: '', country: '', fee_rate: '0.001' }); visible.value = true }
-function openEdit(row) { Object.assign(form, row); visible.value = true }
+function openCreate() {
+  Object.assign(form, {
+    id: '',
+    bank_code: '',
+    bank_name: '',
+    account_number: '',
+    country: '',
+    fee_rate: '0.001',
+    max_fee: '500.00'
+  })
+  visible.value = true
+}
+function openEdit(row) {
+  Object.assign(form, {
+    id: row.id,
+    bank_code: row.bank_code,
+    bank_name: row.bank_name,
+    account_number: row.account_number || '',
+    country: row.country || '',
+    fee_rate: row.fee_rate,
+    max_fee: row.max_fee ?? '500.00'
+  })
+  visible.value = true
+}
 async function openDetail(row) {
   Object.keys(detail).forEach((key) => { delete detail[key] })
   Object.assign(detail, row || {})
@@ -193,11 +237,18 @@ async function openDetail(row) {
   }
 }
 async function save() {
+  const accountNumber = String(form.account_number || '').replace(/\s+/g, '').trim()
+  if (!/^[0-9A-Za-z]{6,34}$/.test(accountNumber) || !/\d/.test(accountNumber)) {
+    ElMessage.warning('Enter a bank account number of 6–34 digits (letters allowed for IBAN).')
+    return
+  }
   const payload = {
     bank_code: form.bank_code,
     bank_name: form.bank_name,
+    account_number: accountNumber,
     country: form.country,
-    fee_rate: form.fee_rate
+    fee_rate: form.fee_rate,
+    max_fee: form.max_fee
   }
   if (form.id) await updateChannel(form.id, payload)
   else await createChannel(payload)

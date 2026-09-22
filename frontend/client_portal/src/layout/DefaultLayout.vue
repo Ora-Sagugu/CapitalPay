@@ -21,9 +21,10 @@
           <el-icon><Wallet /></el-icon><span>{{ $t('menu.wallet') }}</span>
         </el-menu-item>
 
-        <el-sub-menu v-if="canAny(['feature:merchants','feature:virtual_accounts','feature:deposits'])" index="customer">
+        <el-sub-menu v-if="canAny(['feature:merchants','feature:customers','feature:virtual_accounts','feature:deposits'])" index="customer">
           <template #title><el-icon><User /></el-icon><span>{{ $t('menu.customer') }}</span></template>
           <el-menu-item v-if="can('feature:merchants')" index="/merchants">{{ $t('menu.merchants') }}</el-menu-item>
+          <el-menu-item v-if="can('feature:customers')" index="/customers">{{ $t('menu.customers') }}</el-menu-item>
           <el-menu-item v-if="can('feature:virtual_accounts')" index="/virtual-accounts">{{ $t('menu.virtualAccounts') }}</el-menu-item>
           <el-menu-item v-if="can('feature:deposits')" index="/deposits">{{ $t('menu.deposits') }}</el-menu-item>
         </el-sub-menu>
@@ -63,10 +64,10 @@
           <el-menu-item v-if="can('feature:risk_rating')" index="/risk-rating">{{ $t('menu.riskRating') }}</el-menu-item>
         </el-sub-menu>
 
-        <el-sub-menu v-if="canAny(['feature:roles','feature:users'])" index="system">
+        <el-sub-menu v-if="canAny(['feature:roles','feature:users','feature:audit_logs'])" index="system">
           <template #title><el-icon><Setting /></el-icon><span>{{ $t('menu.system') }}</span></template>
           <el-menu-item v-if="can('feature:roles')" index="/roles">{{ $t('menu.roles') }}</el-menu-item>
-          <el-menu-item v-if="can('feature:users')" index="/users">{{ $t('menu.users') }}</el-menu-item>
+          <el-menu-item v-if="canAny(['feature:users','feature:audit_logs'])" index="/users">{{ $t('menu.users') }}</el-menu-item>
         </el-sub-menu>
       </el-menu>
 

@@ -125,7 +125,7 @@ def cover_slide(prs) -> None:
         size=16,
         color=MUTED,
     )
-    add_textbox(slide, Inches(1.0), Inches(6.6), Inches(11), Inches(0.4), "Demo portals: Ops :1025 · Agent :1026 · Customer :1027", size=12, color=MUTED)
+    add_textbox(slide, Inches(1.0), Inches(6.6), Inches(11), Inches(0.4), "Demo portals: Ops :1025 · Agent :1026 · Merchant :1027", size=12, color=MUTED)
 
 
 def process_map_slide(prs) -> None:
@@ -368,7 +368,7 @@ def build() -> Path:
     slides = [
         ("Agent Registration & Login", "01_agent_login.png", "Agents open the Agent portal to sign in or register with a Gmail address."),
         ("Agent Registration Tab", "02_agent_register.png", "New agents create an account from the Register tab, then complete KYC onboarding."),
-        ("Customer Registration & Login", "03_customer_login.png", "Customers use a separate Customer portal URL for sign-in and registration."),
+        ("Merchant Registration & Login", "03_customer_login.png", "Merchants use a separate Merchant portal URL for sign-in and registration."),
         ("Customer Registration Tab", "04_customer_register.png", "Customer registration mirrors agent auth, then routes the user into onboarding."),
         ("Onboarding / KYC", "05_onboarding_kyc.png", "Profile, agent binding, financial details, and documents are submitted for Agent then Ops review."),
         ("Remittance Fee", "06_remittance_fee.png", "Ops configures the global remittance tariff: fixed fee + percent, capped by a maximum."),

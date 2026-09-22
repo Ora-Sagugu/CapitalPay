@@ -1,4 +1,4 @@
-"""Agent must request payout after collection before ops Confirm transfer."""
+"""Agent payout-request gate is retired; merchant and agent books go to ops directly."""
 from datetime import timedelta
 from decimal import Decimal
 
@@ -6,10 +6,9 @@ from django.test import TestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APIClient, APIRequestFactory, force_authenticate
 
-from apps.agent.models import Agent
+from apps.agent.models import Agent, AgentCustomer
 from apps.core.exceptions import BusinessException
 from apps.payment.models import PaymentOrder
-from apps.payment.serializers import build_order_timeline
 from apps.payment.services.fund_trace import AWAITING_AGENT_PAYOUT_HOP, resolve_next_hop
 from apps.payment.services.payment import PaymentConfirmService
 from apps.payment.services.remittance_application import (
@@ -23,7 +22,7 @@ from apps.rbac.testing import attach_super_admin
 from apps.routing.models import BankChannel
 from apps.user_portal.models import EndUser
 from apps.user_portal.services import UserService
-from apps.user_portal.tests import ONBOARDING_PAYLOAD
+from apps.user_portal.tests import ONBOARDING_PAYLOAD, ops_approve_onboarding
 
 
 def _expire():
@@ -63,51 +62,25 @@ class AgentPayoutRequestServiceTests(TestCase):
         values.update(kwargs)
         return PaymentOrder.objects.create(**values)
 
-    def test_confirm_payment_arms_pending_payout_request(self):
+    def test_confirm_payment_does_not_arm_payout_request(self):
         order = self._order()
         confirmed = PaymentConfirmService().manual_confirm_by_order_no(order.order_no)
         self.assertEqual(confirmed.status, PaymentOrder.OrderStatus.PAY_RECEIVED)
         self.assertEqual(
             confirmed.agent_payout_request_status,
-            PaymentOrder.AgentPayoutRequestStatus.PENDING,
+            PaymentOrder.AgentPayoutRequestStatus.NONE,
         )
         hop = resolve_next_hop(confirmed)
-        self.assertEqual(hop, AWAITING_AGENT_PAYOUT_HOP)
-        steps = {step["code"]: step for step in build_order_timeline(confirmed)}
-        self.assertIn("agent_payout_request", steps)
-        self.assertTrue(steps["agent_payout_request"]["active"])
-        self.assertFalse(steps["settlement"]["active"])
+        self.assertNotEqual(hop, AWAITING_AGENT_PAYOUT_HOP)
+        assert_confirm_transfer_allowed(confirmed)
 
-    def test_cannot_request_payout_before_collection(self):
+    def test_request_payout_is_not_required(self):
         order = self._order()
         with self.assertRaises(BusinessException) as ctx:
             RemittanceApplicationService().request_payout_by_agent(order, reviewer="agent-1")
-        self.assertEqual(ctx.exception.code, "AGENT_PAYOUT_STATUS_INVALID")
+        self.assertEqual(ctx.exception.code, "AGENT_PAYOUT_REQUEST_NOT_REQUIRED")
 
-    def test_request_payout_is_idempotent_and_unlocks_confirm_transfer(self):
-        order = self._order()
-        PaymentConfirmService().manual_confirm_by_order_no(order.order_no)
-        order.refresh_from_db()
-        with self.assertRaises(BusinessException) as blocked:
-            assert_confirm_transfer_allowed(order)
-        self.assertEqual(blocked.exception.code, "AGENT_PAYOUT_REQUEST_REQUIRED")
-
-        first = RemittanceApplicationService().request_payout_by_agent(order, reviewer="agent-1")
-        self.assertEqual(
-            first.agent_payout_request_status,
-            PaymentOrder.AgentPayoutRequestStatus.REQUESTED,
-        )
-        self.assertEqual(first.agent_payout_requested_by, "agent-1")
-        second = RemittanceApplicationService().request_payout_by_agent(order, reviewer="agent-2")
-        self.assertEqual(second.agent_payout_requested_by, "agent-1")
-        assert_confirm_transfer_allowed(second)
-        steps = {step["code"]: step for step in build_order_timeline(second)}
-        self.assertTrue(steps["agent_payout_request"]["verified"])
-        self.assertTrue(steps["settlement"]["active"])
-
-    def test_direct_customer_skips_payout_gate(self):
-        self.merchant.agent = None
-        self.merchant.save(update_fields=["agent", "updated_at"])
+    def test_legacy_merchant_agent_fk_skips_payout_gate(self):
         order = self._order()
         PaymentConfirmService().manual_confirm_by_order_no(order.order_no)
         order.refresh_from_db()
@@ -116,9 +89,6 @@ class AgentPayoutRequestServiceTests(TestCase):
             PaymentOrder.AgentPayoutRequestStatus.NONE,
         )
         assert_confirm_transfer_allowed(order)
-        with self.assertRaises(BusinessException) as ctx:
-            RemittanceApplicationService().request_payout_by_agent(order, reviewer="nobody")
-        self.assertEqual(ctx.exception.code, "AGENT_PAYOUT_REQUEST_NOT_REQUIRED")
 
     @override_settings(ENABLE_AGENTS=False)
     def test_agents_disabled_skips_payout_gate(self):
@@ -163,10 +133,12 @@ class AgentPayoutRequestOpsApiTests(TestCase):
         BankChannel.objects.create(
             bank_code="MID",
             bank_name="Mid Bank",
+            account_number="6200030000000001",
             fee_rate=Decimal("0.002"),
             min_fee=Decimal("1.00"),
             max_fee=Decimal("500.00"),
-            usd_balance=Decimal("500.00"),
+            currency="USD",
+            balance=Decimal("500.00"),
             priority=1,
         )
         self.ops = SystemUser.objects.create(
@@ -186,25 +158,15 @@ class AgentPayoutRequestOpsApiTests(TestCase):
         force_authenticate(request, user=self.ops)
         return PaymentOrderViewSet.as_view({method: action})(request, order_no=order_no)
 
-    def test_confirm_transfer_blocked_on_pending_pay_for_bound_agent(self):
+    def test_confirm_transfer_from_pending_pay_without_agent_gate(self):
         response = self._call("post", "confirm_transfer", self.pending_pay.order_no)
-        self.assertEqual(response.status_code, 409)
-        self.assertEqual(response.data["code"], "AGENT_PAYOUT_REQUEST_REQUIRED")
+        self.assertEqual(response.status_code, 200, getattr(response, "data", response))
         self.pending_pay.refresh_from_db()
-        self.assertEqual(self.pending_pay.status, PaymentOrder.OrderStatus.PENDING_PAY)
-        self.assertFalse(self.pending_pay.bank_code)
+        self.assertEqual(self.pending_pay.status, PaymentOrder.OrderStatus.PENDING_SETTLE)
 
-    def test_confirm_transfer_blocked_until_agent_requests(self):
+    def test_confirm_transfer_after_collection_without_payout_request(self):
         credited = self._call("post", "confirm_payment", self.pending_pay.order_no)
         self.assertEqual(credited.status_code, 200, getattr(credited, "data", credited))
-        blocked = self._call("post", "confirm_transfer", self.pending_pay.order_no)
-        self.assertEqual(blocked.status_code, 409)
-        self.assertEqual(blocked.data["code"], "AGENT_PAYOUT_REQUEST_REQUIRED")
-
-        self.pending_pay.refresh_from_db()
-        RemittanceApplicationService().request_payout_by_agent(
-            self.pending_pay, reviewer="agent-ops",
-        )
         transferred = self._call("post", "confirm_transfer", self.pending_pay.order_no)
         self.assertEqual(transferred.status_code, 200, getattr(transferred, "data", transferred))
         self.pending_pay.refresh_from_db()
@@ -235,10 +197,12 @@ class DirectCustomerPayoutStillOpenTests(TestCase):
         BankChannel.objects.create(
             bank_code="MID",
             bank_name="Mid Bank",
+            account_number="6200030000000002",
             fee_rate=Decimal("0.002"),
             min_fee=Decimal("1.00"),
             max_fee=Decimal("500.00"),
-            usd_balance=Decimal("500.00"),
+            currency="USD",
+            balance=Decimal("500.00"),
             priority=1,
         )
         self.ops = SystemUser.objects.create(
@@ -273,18 +237,22 @@ class AgentPayoutRequestPortalApiTests(TestCase):
             "basic": {**ONBOARDING_PAYLOAD["basic"], "contact_phone": "13900000081"},
         }
         self.svc.submit_onboarding(self.user, payload)
-        self.svc.review_onboarding(self.user, action="approve", reviewer="ops")
+        ops_approve_onboarding(self.svc, self.user)
         self.user.refresh_from_db()
-        self.merchant = create_eligible_merchant("PP")
-        self.merchant.agent = self.user.default_agent
-        self.merchant.save(update_fields=["agent", "updated_at"])
+        self.customer = AgentCustomer.objects.create(
+            agent=self.user.default_agent,
+            legal_name="Payout Customer",
+            kyc_status=AgentCustomer.KycStatus.APPROVED,
+        )
         expire = _expire()
         self.collected = PaymentOrder.objects.create(
             order_no="RMT_PORTAL_PAYOUT",
             merchant_order_no="M_PORTAL_PAYOUT",
             unique_identification_no="UIN_PORTAL_PAYOUT",
             idempotency_key="IDEM_PORTAL_PAYOUT",
-            merchant=self.merchant,
+            merchant=None,
+            agent=self.user.default_agent,
+            agent_customer=self.customer,
             amount=Decimal("80.00"),
             currency="USD",
             from_currency="USD",
@@ -292,7 +260,7 @@ class AgentPayoutRequestPortalApiTests(TestCase):
             fee_amount=Decimal("1.00"),
             settle_amount=Decimal("79.00"),
             status=PaymentOrder.OrderStatus.PAY_RECEIVED,
-            agent_payout_request_status=PaymentOrder.AgentPayoutRequestStatus.PENDING,
+            agent_payout_request_status=PaymentOrder.AgentPayoutRequestStatus.NONE,
             pay_method="WIRE_TRANSFER",
             pay_received_at=timezone.now(),
             expire_at=expire,
@@ -301,34 +269,19 @@ class AgentPayoutRequestPortalApiTests(TestCase):
         token = UserService._generate_token(str(self.user.id), user_type="user")
         self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {token}")
 
-    def test_agent_can_list_and_request_payout(self):
+    def test_agent_payout_request_endpoint_is_disabled(self):
         listed = self.client.get("/api/v1/user/agent/orders/", {"stage": "awaiting_payout"})
         self.assertEqual(listed.status_code, 200)
-        nos = [row["order_no"] for row in listed.data["items"]]
-        self.assertIn(self.collected.order_no, nos)
-        self.assertGreaterEqual(listed.data["stats"]["awaiting_payout"], 1)
+        self.assertEqual(listed.data["items"], [])
+        self.assertEqual(listed.data["stats"]["awaiting_payout"], 0)
 
         first = self.client.post(
             f"/api/v1/user/agent/orders/{self.collected.order_no}/request-payout/",
             {},
             format="json",
         )
-        self.assertEqual(first.status_code, 200, getattr(first, "data", first))
-        self.assertEqual(
-            first.data["agent_payout_request_status"],
-            PaymentOrder.AgentPayoutRequestStatus.REQUESTED,
-        )
-        second = self.client.post(
-            f"/api/v1/user/agent/orders/{self.collected.order_no}/request-payout/",
-            {},
-            format="json",
-        )
-        self.assertEqual(second.status_code, 200)
-        empty = self.client.get("/api/v1/user/agent/orders/", {"stage": "awaiting_payout"})
-        self.assertNotIn(
-            self.collected.order_no,
-            [row["order_no"] for row in empty.data["items"]],
-        )
+        self.assertEqual(first.status_code, 409)
+        self.assertEqual(first.data["code"], "AGENT_PAYOUT_REQUEST_NOT_REQUIRED")
 
     def test_other_agent_cannot_request_payout(self):
         self.svc.register(phone="13900000082", password="Test@123", sms_code="")
@@ -340,7 +293,7 @@ class AgentPayoutRequestPortalApiTests(TestCase):
             "basic": {**ONBOARDING_PAYLOAD["basic"], "contact_phone": "13900000082"},
         }
         self.svc.submit_onboarding(other_user, payload)
-        self.svc.review_onboarding(other_user, action="approve", reviewer="ops")
+        ops_approve_onboarding(self.svc, other_user)
         other_user.refresh_from_db()
         token = UserService._generate_token(str(other_user.id), user_type="user")
         client = APIClient()
@@ -352,8 +305,3 @@ class AgentPayoutRequestPortalApiTests(TestCase):
         )
         self.assertEqual(res.status_code, 403)
         self.assertEqual(res.data["code"], "AGENT_ORDER_FORBIDDEN")
-        self.collected.refresh_from_db()
-        self.assertEqual(
-            self.collected.agent_payout_request_status,
-            PaymentOrder.AgentPayoutRequestStatus.PENDING,
-        )

@@ -18,7 +18,7 @@
         <el-table-column type="selection" width="42" />
         <el-table-column prop="order_no" label="Order reference" min-width="170" />
         <el-table-column prop="prn_code" label="PRN" min-width="110" />
-        <el-table-column prop="merchant_name" label="Customer" min-width="140" />
+        <el-table-column prop="merchant_name" label="Merchant" min-width="140" />
         <el-table-column prop="from_currency" label="Source" min-width="90" />
         <el-table-column prop="to_currency" label="Destination" min-width="110" />
         <el-table-column prop="fee_amount" label="Charges" min-width="90" :formatter="formatMoneyCell" />

@@ -251,7 +251,8 @@ class MerchantServiceTest(TestCase):
             "max_single_amount": Decimal("1000000"),
         })
         self.assertTrue(product.is_enabled)
-        self.assertEqual(product.max_single_amount, Decimal("1000000"))
+        # Product limits are ignored; remittance uses merchant-level limits only.
+        self.assertIsNone(product.max_single_amount)
 
     def test_set_payment_product_update(self):
         """更新已有支付产品配置。"""

@@ -89,7 +89,10 @@ class OrderStatusTimelineTests(TestCase):
 
 class RemittanceStatusSequenceTests(TestCase):
     def setUp(self):
+        from apps.payment.tests_remittance_v2 import create_approved_customer
+
         self.merchant = create_eligible_merchant("STSEQ")
+        self.customer = create_approved_customer(self.merchant)
         ExchangeRate.objects.create(
             date=timezone.localdate(),
             from_currency="USD",
@@ -101,6 +104,7 @@ class RemittanceStatusSequenceTests(TestCase):
     def _quote(self, actor_type="CUSTOMER", user_id="user-st"):
         return RemittanceQuoteService().create_quote(
             merchant=self.merchant,
+            agent_customer=self.customer if actor_type == "CUSTOMER" else None,
             amount=Decimal("1000"),
             from_currency="USD",
             to_currency="CNY",
@@ -113,6 +117,7 @@ class RemittanceStatusSequenceTests(TestCase):
         quote = self._quote()
         order, created = RemittanceApplicationService().submit(
             merchant=self.merchant,
+            agent_customer=self.customer,
             payload=submit_payload(quote),
             idempotency_key="idem-st-seq-1",
             user_id="user-st",
@@ -138,7 +143,7 @@ class RemittanceStatusSequenceTests(TestCase):
         self.assertNotEqual(order.status, PaymentOrder.OrderStatus.PRE_CREATE)
         self.assertNotEqual(order.status, PaymentOrder.OrderStatus.PROCESSING)
 
-    def test_customer_with_agent_starts_pending_agent_review(self):
+    def test_customer_with_agent_still_starts_pending_review(self):
         agent = Agent.objects.create(
             agent_no="AG_ST_SEQ",
             agent_name="Status Sequence Agent",
@@ -149,15 +154,16 @@ class RemittanceStatusSequenceTests(TestCase):
         quote = self._quote()
         order, created = RemittanceApplicationService().submit(
             merchant=self.merchant,
+            agent_customer=self.customer,
             payload=submit_payload(quote),
             idempotency_key="idem-st-seq-3",
             user_id="user-st",
             actor_type="CUSTOMER",
         )
         self.assertTrue(created)
-        self.assertEqual(order.status, PaymentOrder.OrderStatus.PENDING_AGENT_REVIEW)
+        self.assertEqual(order.status, PaymentOrder.OrderStatus.PENDING_REVIEW)
         self.assertEqual(
-            order.agent_review_status, PaymentOrder.AgentReviewStatus.PENDING
+            order.agent_review_status, PaymentOrder.AgentReviewStatus.NONE
         )
 
     def test_live_path_excludes_retired_independent_statuses(self):

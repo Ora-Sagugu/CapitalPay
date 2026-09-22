@@ -15,7 +15,15 @@ class RemittanceQuote(BaseModel):
     quote_no = models.CharField(max_length=40, unique=True, db_index=True, verbose_name="报价编号")
     merchant = models.ForeignKey(
         "merchant.Merchant", on_delete=models.PROTECT, related_name="remittance_quotes",
-        verbose_name="商户",
+        verbose_name="商户", null=True, blank=True,
+    )
+    agent = models.ForeignKey(
+        "agent.Agent", on_delete=models.PROTECT, related_name="remittance_quotes",
+        verbose_name="代理商", null=True, blank=True,
+    )
+    agent_customer = models.ForeignKey(
+        "agent.AgentCustomer", on_delete=models.PROTECT, related_name="remittance_quotes",
+        verbose_name="代理客户", null=True, blank=True,
     )
     user_id = models.CharField(max_length=64, blank=True, default="", verbose_name="客户用户ID")
     actor_type = models.CharField(
@@ -64,6 +72,13 @@ class RemittanceQuote(BaseModel):
                 check=models.Q(status__in=["ACTIVE", "USED", "EXPIRED"]),
                 name="remittance_quote_valid_status",
             ),
+            models.CheckConstraint(
+                check=(
+                    models.Q(merchant__isnull=False, agent__isnull=True)
+                    | models.Q(merchant__isnull=True, agent__isnull=False)
+                ),
+                name="remittance_quote_book_owner_xor",
+            ),
         ]
 
 
@@ -86,6 +101,29 @@ class MerchantDailyRemittanceUsage(BaseModel):
             models.UniqueConstraint(
                 fields=["merchant", "usage_date"],
                 name="unique_merchant_daily_remittance_usage",
+            ),
+        ]
+
+
+class AgentDailyRemittanceUsage(BaseModel):
+    """代理每日汇款额度的原子预留记录。"""
+
+    agent = models.ForeignKey(
+        "agent.Agent", on_delete=models.PROTECT, related_name="daily_remittance_usage",
+        verbose_name="代理商",
+    )
+    usage_date = models.DateField(verbose_name="业务日期")
+    total_amount = models.DecimalField(
+        max_digits=20, decimal_places=2, default=0, verbose_name="已预留汇款金额"
+    )
+    order_count = models.PositiveIntegerField(default=0, verbose_name="已预留订单数")
+
+    class Meta:
+        db_table = "agent_daily_remittance_usage"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["agent", "usage_date"],
+                name="unique_agent_daily_remittance_usage",
             ),
         ]
 
@@ -147,6 +185,15 @@ class PaymentOrder(BaseModel):
         ONLINE_BANK = "ONLINE_BANK", "银行网银支付"
         AUTHORIZED = "AUTHORIZED", "账户授权支付"
         WIRE_TRANSFER = "WIRE_TRANSFER", "转款汇款"
+        WALLET = "WALLET", "钱包支付"
+        CARD = "CARD", "银行卡支付"
+
+    # Remittance funding rails shown to merchants (external platforms credit CapitalPay).
+    REMITTANCE_FUNDING_METHODS = (
+        PayMethod.WIRE_TRANSFER,
+        PayMethod.WALLET,
+        PayMethod.CARD,
+    )
 
     # ── 订单标识 ──
     order_no = models.CharField(max_length=32, unique=True, db_index=True, verbose_name="平台订单号")
@@ -160,7 +207,16 @@ class PaymentOrder(BaseModel):
 
     # ── 关联 ──
     merchant = models.ForeignKey(
-        "merchant.Merchant", on_delete=models.PROTECT, related_name="orders", verbose_name="商户"
+        "merchant.Merchant", on_delete=models.PROTECT, related_name="orders", verbose_name="商户",
+        null=True, blank=True,
+    )
+    agent = models.ForeignKey(
+        "agent.Agent", on_delete=models.PROTECT, related_name="orders", verbose_name="代理商",
+        null=True, blank=True,
+    )
+    agent_customer = models.ForeignKey(
+        "agent.AgentCustomer", on_delete=models.PROTECT, related_name="orders",
+        verbose_name="代理客户", null=True, blank=True,
     )
     user_id = models.CharField(max_length=64, null=True, blank=True, verbose_name="用户ID")
     quote = models.OneToOneField(
@@ -234,6 +290,12 @@ class PaymentOrder(BaseModel):
     # ── 支付方式 ──
     pay_method = models.CharField(max_length=32, choices=PayMethod.choices, verbose_name="支付方式")
     bank_code = models.CharField(max_length=16, null=True, blank=True, verbose_name="银行编码")
+    payout_splits = models.JSONField(
+        default=list,
+        blank=True,
+        verbose_name="出款银行拆分",
+        help_text="Confirm transfer 时可按剩余余额拆到最多两家银行，例如 [{bank_code, amount, computed_fee}, ...]",
+    )
     bank_txn_id = models.CharField(max_length=64, null=True, blank=True, verbose_name="银行交易流水号")
 
     # ── 状态 ──
@@ -274,10 +336,49 @@ class PaymentOrder(BaseModel):
             models.Index(fields=["user_id", "status"]),
             models.Index(fields=["status", "created_at"]),
             models.Index(fields=["merchant", "pay_received_at"]),
+            models.Index(fields=["agent", "created_at"]),
+        ]
+        constraints = [
+            models.CheckConstraint(
+                check=(
+                    models.Q(merchant__isnull=False, agent__isnull=True)
+                    | models.Q(merchant__isnull=True, agent__isnull=False)
+                ),
+                name="payment_order_book_owner_xor",
+            ),
         ]
 
     def __str__(self):
         return f"{self.order_no} - {self.amount}"
+
+    @property
+    def party_name(self) -> str:
+        customer = getattr(self, "agent_customer", None)
+        if customer:
+            return customer.legal_name
+        if self.agent_id and getattr(self, "agent", None) and not self.merchant_id:
+            return self.agent.agent_name
+        merchant = getattr(self, "merchant", None)
+        return merchant.merchant_name if merchant else ""
+
+    @property
+    def party_no(self) -> str:
+        customer = getattr(self, "agent_customer", None)
+        if customer:
+            return customer.customer_no
+        if self.agent_id and getattr(self, "agent", None) and not self.merchant_id:
+            return self.agent.agent_no
+        merchant = getattr(self, "merchant", None)
+        return merchant.merchant_no if merchant else ""
+
+    def expected_collection_amount(self):
+        """Offline bank credit expected: principal + sender-borne remittance fee."""
+        from decimal import Decimal
+
+        total = getattr(self, "sender_total_amount", None)
+        if total is not None and Decimal(str(total)) > 0:
+            return Decimal(str(total)).quantize(Decimal("0.01"))
+        return Decimal(str(self.amount)).quantize(Decimal("0.01"))
 
     def add_status_history(self, status: str, extra: dict = None):
         """追加状态历史。"""

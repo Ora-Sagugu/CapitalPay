@@ -42,11 +42,11 @@
           </div>
         </el-tab-pane>
 
-        <el-tab-pane label="Customer wallets" name="customers">
+        <el-tab-pane label="Merchant wallets" name="customers">
           <div class="toolbar">
             <el-input
               v-model="customerFilter"
-              placeholder="Customer / wallet ID"
+              placeholder="Merchant / wallet ID"
               clearable
               style="width: 220px"
             />
@@ -60,7 +60,7 @@
           </div>
           <el-table :data="filteredCustomers" max-height="480">
             <el-table-column prop="wallet_id" label="Wallet ID" min-width="120" />
-            <el-table-column prop="owner_name" label="Customer" min-width="160" />
+            <el-table-column prop="owner_name" label="Merchant" min-width="160" />
             <el-table-column prop="currency" label="Currency" width="100" />
             <el-table-column label="Balance" min-width="120">
               <template #default="{ row }">{{ money(row.balance) }}</template>
@@ -84,16 +84,16 @@
             <el-table-column label="Actions" width="200" fixed="right">
               <template #default="{ row }">
                 <el-button link type="primary" @click="openDetail(row)">Details</el-button>
-                <el-button link type="primary" @click="openAdjust(row, 'credit')">Credit</el-button>
+                <el-button v-if="canAdjust" link type="primary" @click="openAdjust(row, 'credit')">Credit</el-button>
                 <el-button
-                  v-if="row.status !== 'FROZEN'"
+                  v-if="canFreeze && row.status !== 'FROZEN'"
                   link
                   type="warning"
                   @click="toggleFreeze(row)"
                 >
                   Freeze
                 </el-button>
-                <el-button v-else link type="success" @click="toggleFreeze(row)">Unfreeze</el-button>
+                <el-button v-else-if="canFreeze" link type="success" @click="toggleFreeze(row)">Unfreeze</el-button>
               </template>
             </el-table-column>
           </el-table>
@@ -142,16 +142,16 @@
             <el-table-column label="Actions" width="200" fixed="right">
               <template #default="{ row }">
                 <el-button link type="primary" @click="openDetail(row)">Details</el-button>
-                <el-button link type="primary" @click="openAdjust(row, 'credit')">Credit</el-button>
+                <el-button v-if="canAdjust" link type="primary" @click="openAdjust(row, 'credit')">Credit</el-button>
                 <el-button
-                  v-if="row.status !== 'FROZEN'"
+                  v-if="canFreeze && row.status !== 'FROZEN'"
                   link
                   type="warning"
                   @click="toggleFreeze(row)"
                 >
                   Freeze
                 </el-button>
-                <el-button v-else link type="success" @click="toggleFreeze(row)">Unfreeze</el-button>
+                <el-button v-else-if="canFreeze" link type="success" @click="toggleFreeze(row)">Unfreeze</el-button>
               </template>
             </el-table-column>
           </el-table>
@@ -161,7 +161,7 @@
           <div class="toolbar">
             <el-select v-model="ledgerOwnerType" placeholder="Owner type" clearable style="width: 140px">
               <el-option label="Platform" value="PLATFORM" />
-              <el-option label="Customer" value="CUSTOMER" />
+              <el-option label="Merchant" value="CUSTOMER" />
               <el-option label="Agent" value="AGENT" />
             </el-select>
             <el-select v-model="ledgerType" placeholder="Type" clearable style="width: 150px">
@@ -283,9 +283,10 @@
           <el-descriptions-item label="Updated">{{ datetime(detailRow.updated_at) }}</el-descriptions-item>
         </el-descriptions>
         <div class="drawer-actions">
-          <el-button type="primary" @click="openAdjust(detailRow, 'credit')">Credit</el-button>
-          <el-button @click="openAdjust(detailRow, 'debit')">Debit</el-button>
+          <el-button v-if="canAdjust" type="primary" @click="openAdjust(detailRow, 'credit')">Credit</el-button>
+          <el-button v-if="canAdjust" @click="openAdjust(detailRow, 'debit')">Debit</el-button>
           <el-button
+            v-if="canFreeze"
             :type="detailRow.status === 'FROZEN' ? 'success' : 'warning'"
             plain
             @click="toggleFreeze(detailRow)"
@@ -334,6 +335,11 @@ import { ElMessage } from 'element-plus'
 import PageHeader from '@/components/PageHeader.vue'
 import KpiCards from '@/components/KpiCards.vue'
 import { datetime, money } from '@/utils/format'
+import { useAuthStore } from '@/store/auth'
+
+const auth = useAuthStore()
+const canFreeze = computed(() => auth.hasPermission('feature:wallet.freeze'))
+const canAdjust = computed(() => auth.hasPermission('feature:adjustments.approve'))
 
 const now = Date.now()
 
@@ -356,29 +362,29 @@ const DEMO_CUSTOMERS = [
   {
     wallet_id: 'CW-10021',
     owner_type: 'CUSTOMER',
-    owner_name: 'Horizon Trade Limited',
+    owner_name: 'Amy Fox Trading Limited',
     currency: 'USD',
-    balance: '12580.50',
-    available: '12580.50',
-    frozen: '0.00',
+    balance: '128450.00',
+    available: '118450.00',
+    frozen: '10000.00',
     status: 'ACTIVE',
     updated_at: hoursAgo(2)
   },
   {
     wallet_id: 'CW-10022',
     owner_type: 'CUSTOMER',
-    owner_name: 'Lagos Agro Commodities',
-    currency: 'USD',
-    balance: '176032.25',
-    available: '166032.25',
-    frozen: '10000.00',
+    owner_name: 'Amy Fox Trading Limited',
+    currency: 'EUR',
+    balance: '46200.50',
+    available: '46200.50',
+    frozen: '0.00',
     status: 'ACTIVE',
     updated_at: hoursAgo(5)
   },
   {
     wallet_id: 'CW-10023',
     owner_type: 'CUSTOMER',
-    owner_name: 'Nairobi Retail Hub',
+    owner_name: 'Nairobi Fresh Produce Ltd',
     currency: 'KES',
     balance: '250000.00',
     available: '0.00',
@@ -389,18 +395,18 @@ const DEMO_CUSTOMERS = [
   {
     wallet_id: 'CW-10024',
     owner_type: 'CUSTOMER',
-    owner_name: 'Pearl Import Co.',
-    currency: 'EUR',
-    balance: '4320.00',
-    available: '3820.00',
-    frozen: '500.00',
+    owner_name: 'Mombasa Port Traders',
+    currency: 'USD',
+    balance: '18640.00',
+    available: '17640.00',
+    frozen: '1000.00',
     status: 'ACTIVE',
     updated_at: daysAgo(2)
   },
   {
     wallet_id: 'CW-10025',
     owner_type: 'CUSTOMER',
-    owner_name: 'Shenzhen Electronics',
+    owner_name: 'Thika Textile Mills',
     currency: 'CNY',
     balance: '88000.00',
     available: '88000.00',
@@ -414,11 +420,11 @@ const DEMO_AGENTS = [
   {
     wallet_id: 'AW-3001',
     owner_type: 'AGENT',
-    owner_name: 'Grace Nyambura',
-    agent_code: 'AG20260003',
+    owner_name: 'Tom Lee',
+    agent_code: 'AG20260917',
     currency: 'USD',
-    balance: '45200.00',
-    available: '45200.00',
+    balance: '186500.00',
+    available: '186500.00',
     frozen: '0.00',
     status: 'ACTIVE',
     updated_at: hoursAgo(1)
@@ -426,8 +432,8 @@ const DEMO_AGENTS = [
   {
     wallet_id: 'AW-3002',
     owner_type: 'AGENT',
-    owner_name: 'East Africa Desk',
-    agent_code: 'AG20260011',
+    owner_name: 'Tom Lee Collection',
+    agent_code: 'AG20260917',
     currency: 'KES',
     balance: '980000.00',
     available: '880000.00',
@@ -438,8 +444,8 @@ const DEMO_AGENTS = [
   {
     wallet_id: 'AW-3003',
     owner_type: 'AGENT',
-    owner_name: 'Coastal Partners',
-    agent_code: 'AG20260018',
+    owner_name: 'Tom Lee Collection',
+    agent_code: 'AG20260917',
     currency: 'EUR',
     balance: '12500.00',
     available: '0.00',
@@ -454,11 +460,11 @@ function seedLedger() {
     {
       id: 'WTX-9012',
       owner_type: 'CUSTOMER',
-      owner_name: 'Horizon Trade Limited',
+      owner_name: 'Amy Fox Trading Limited',
       type: 'TOP_UP',
       currency: 'USD',
-      amount: '2000.00',
-      balance_after: '12580.50',
+      amount: '20000.00',
+      balance_after: '128450.00',
       status: 'SUCCESS',
       remark: 'Bank transfer credit / PRN A25503',
       created_at: hoursAgo(1)
@@ -466,11 +472,11 @@ function seedLedger() {
     {
       id: 'WTX-9011',
       owner_type: 'AGENT',
-      owner_name: 'Grace Nyambura',
+      owner_name: 'Tom Lee',
       type: 'CREDIT',
       currency: 'USD',
       amount: '1200.00',
-      balance_after: '45200.00',
+      balance_after: '186500.00',
       status: 'SUCCESS',
       remark: 'Commission settlement',
       created_at: hoursAgo(3)
@@ -490,7 +496,7 @@ function seedLedger() {
     {
       id: 'WTX-9009',
       owner_type: 'CUSTOMER',
-      owner_name: 'Pearl Import Co.',
+      owner_name: 'Mombasa Port Traders',
       type: 'TRANSFER_OUT',
       currency: 'EUR',
       amount: '500.00',
@@ -502,7 +508,7 @@ function seedLedger() {
     {
       id: 'WTX-9008',
       owner_type: 'CUSTOMER',
-      owner_name: 'Nairobi Retail Hub',
+      owner_name: 'Nairobi Fresh Produce Ltd',
       type: 'FREEZE',
       currency: 'KES',
       amount: '250000.00',
@@ -514,11 +520,11 @@ function seedLedger() {
     {
       id: 'WTX-9007',
       owner_type: 'CUSTOMER',
-      owner_name: 'Lagos Agro Commodities',
+      owner_name: 'Amy Fox Trading Limited',
       type: 'WITHDRAW',
       currency: 'USD',
       amount: '5000.00',
-      balance_after: '176032.25',
+      balance_after: '118450.00',
       status: 'PENDING',
       remark: 'External bank payout',
       created_at: daysAgo(2)
@@ -526,7 +532,7 @@ function seedLedger() {
     {
       id: 'WTX-9006',
       owner_type: 'AGENT',
-      owner_name: 'East Africa Desk',
+      owner_name: 'Tom Lee Collection',
       type: 'TOP_UP',
       currency: 'KES',
       amount: '200000.00',
@@ -542,8 +548,8 @@ const DEMO_REQUESTS = [
   {
     request_no: 'WR-4401',
     owner_type: 'CUSTOMER',
-    owner_name: 'Lagos Agro Commodities',
-    wallet_id: 'CW-10022',
+    owner_name: 'Amy Fox Trading Limited',
+    wallet_id: 'CW-10021',
     type: 'WITHDRAW',
     currency: 'USD',
     amount: '5000.00',
@@ -554,7 +560,7 @@ const DEMO_REQUESTS = [
   {
     request_no: 'WR-4402',
     owner_type: 'AGENT',
-    owner_name: 'Grace Nyambura',
+    owner_name: 'Tom Lee',
     wallet_id: 'AW-3001',
     type: 'TOP_UP',
     currency: 'USD',
@@ -566,7 +572,7 @@ const DEMO_REQUESTS = [
   {
     request_no: 'WR-4398',
     owner_type: 'CUSTOMER',
-    owner_name: 'Shenzhen Electronics',
+    owner_name: 'Thika Textile Mills',
     wallet_id: 'CW-10025',
     type: 'TOP_UP',
     currency: 'CNY',
@@ -620,7 +626,7 @@ const kpis = computed(() => {
   const usdTreasury = treasury.value.find((t) => t.currency === 'USD')
   return [
     { label: 'USD treasury', value: money(usdTreasury?.balance || 0), icon: 'Money', hint: 'Platform float' },
-    { label: 'Active wallets', value: String(active), icon: 'Wallet', hint: 'Customer + agent' },
+    { label: 'Active wallets', value: String(active), icon: 'Wallet', hint: 'Merchant + agent' },
     { label: 'Frozen wallets', value: String(frozen), icon: 'Lock', color: '#e6a23c', bg: '#fdf6ec' },
     { label: 'Pending requests', value: String(pending), icon: 'Bell', color: '#409eff', bg: '#ecf5ff' }
   ]
@@ -663,7 +669,7 @@ function fmt(n) {
 function ownerTypeLabel(type) {
   if (type === 'PLATFORM') return 'Platform'
   if (type === 'AGENT') return 'Agent'
-  return 'Customer'
+  return 'Merchant'
 }
 
 function typeLabel(type) {

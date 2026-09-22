@@ -7,12 +7,14 @@ from decimal import Decimal
 
 from django.conf import settings
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 
 from apps.core.exceptions import BusinessException, ErrorCode
 from apps.core.utils import generate_uin
 from apps.merchant.models import Merchant
 from apps.payment.models import (
+    AgentDailyRemittanceUsage,
     MerchantDailyRemittanceUsage,
     PaymentOrder,
     RemittanceQuote,
@@ -23,11 +25,8 @@ from .remittance_policy import RemittanceEligibilityPolicy
 
 
 def agent_payout_gate_required(order) -> bool:
-    """Bound-agent remittances wait for Agent Request payout after collection."""
-    if not getattr(settings, "ENABLE_AGENTS", True):
-        return False
-    merchant = getattr(order, "merchant", None)
-    return bool(merchant and getattr(merchant, "agent_id", None))
+    """Merchant remittances no longer wait for an agent payout request."""
+    return False
 
 
 def arm_agent_payout_request(order: PaymentOrder) -> PaymentOrder:
@@ -57,6 +56,23 @@ def assert_confirm_transfer_allowed(order: PaymentOrder) -> None:
         )
 
 
+def awaiting_confirm_transfer_q() -> Q:
+    """Orders that currently show Confirm transfer on Remittance Orders."""
+    pending = PaymentOrder.AgentPayoutRequestStatus.PENDING
+    requested = PaymentOrder.AgentPayoutRequestStatus.REQUESTED
+    return (
+        Q(status=PaymentOrder.OrderStatus.PAY_RECEIVED)
+        & ~Q(agent_payout_request_status=pending)
+    ) | (
+        Q(status=PaymentOrder.OrderStatus.PENDING_PAY)
+        & ~Q(agent_payout_request_status__in=[pending, requested])
+    )
+
+
+def filter_awaiting_confirm_transfer(qs):
+    return qs.filter(awaiting_confirm_transfer_q())
+
+
 def request_payload_hash(payload: dict, *, merchant_no: str, user_id: str) -> str:
     canonical = {
         "merchant": merchant_no,
@@ -70,16 +86,7 @@ def request_payload_hash(payload: dict, *, merchant_no: str, user_id: str) -> st
 class RemittanceApplicationService:
     @staticmethod
     def initial_review_state(merchant: Merchant, actor_type: str) -> tuple[str, str]:
-        """Customer submit with a bound agent waits for agent agree before ops review."""
-        if (
-            actor_type == "CUSTOMER"
-            and getattr(settings, "ENABLE_AGENTS", True)
-            and merchant.agent_id
-        ):
-            return (
-                PaymentOrder.OrderStatus.PENDING_AGENT_REVIEW,
-                PaymentOrder.AgentReviewStatus.PENDING,
-            )
+        """Merchant and agent submissions both go straight to operations review."""
         return (
             PaymentOrder.OrderStatus.PENDING_REVIEW,
             PaymentOrder.AgentReviewStatus.NONE,
@@ -89,7 +96,9 @@ class RemittanceApplicationService:
     def submit(
         self,
         *,
-        merchant: Merchant,
+        merchant: Merchant | None = None,
+        agent=None,
+        agent_customer=None,
         payload: dict,
         idempotency_key: str,
         user_id: str = "",
@@ -106,9 +115,10 @@ class RemittanceApplicationService:
         if len(idempotency_key) > 64:
             raise BusinessException("IDEMPOTENCY_KEY_INVALID", "The Idempotency-Key exceeds the permitted length", 400)
 
+        book_no = merchant.merchant_no if merchant is not None else (agent.agent_no if agent is not None else "")
         digest = request_payload_hash(
             payload,
-            merchant_no=merchant.merchant_no,
+            merchant_no=book_no,
             user_id=user_id,
         )
         existing = PaymentOrder.objects.select_for_update().filter(
@@ -124,13 +134,29 @@ class RemittanceApplicationService:
             )
 
         quote_no = payload["quote_id"]
-        quote = RemittanceQuote.objects.select_for_update().filter(
+        quote_qs = RemittanceQuote.objects.select_for_update().filter(
             quote_no=quote_no,
-            merchant_id=merchant.id,
             is_deleted=False,
-        ).first()
+        )
+        if merchant is not None:
+            quote_qs = quote_qs.filter(merchant_id=merchant.id)
+        elif agent is not None:
+            quote_qs = quote_qs.filter(agent_id=agent.id)
+        quote = quote_qs.first()
         if not quote:
             raise BusinessException("QUOTE_NOT_FOUND", "The quotation does not exist; please obtain a new quotation", 404)
+        if agent_customer is None and quote.agent_customer_id:
+            agent_customer = quote.agent_customer
+        elif (
+            agent_customer is not None
+            and quote.agent_customer_id
+            and quote.agent_customer_id != agent_customer.id
+        ):
+            raise BusinessException(
+                "CUSTOMER_MISMATCH",
+                "The selected customer does not match this quotation",
+                409,
+            )
         if quote.actor_type != actor_type:
             raise BusinessException("QUOTE_OWNER_MISMATCH", "The quotation originator does not match the authenticated principal", 403)
         if actor_type in ("CUSTOMER", "AGENT") and quote.user_id != str(user_id):
@@ -146,16 +172,36 @@ class RemittanceApplicationService:
         if quote.expires_at <= timezone.now():
             raise BusinessException("QUOTE_EXPIRED", "The quotation has expired; please obtain a new quotation", 422)
 
-        merchant = Merchant.objects.select_for_update().select_related("agent").get(pk=merchant.pk)
-        usage, created = MerchantDailyRemittanceUsage.objects.get_or_create(
-            merchant=merchant,
-            usage_date=timezone.localdate(),
-            defaults={"total_amount": Decimal("0"), "order_count": 0},
-        )
-        if not created:
-            usage = MerchantDailyRemittanceUsage.objects.select_for_update().get(pk=usage.pk)
+        if agent is not None:
+            from apps.agent.models import Agent
+            from apps.payment.services.remittance_policy import AgentRemittanceEligibilityPolicy
 
-        RemittanceEligibilityPolicy().assert_eligible(merchant, quote.amount)
+            agent = Agent.objects.select_for_update().get(pk=agent.pk)
+            usage, created = AgentDailyRemittanceUsage.objects.get_or_create(
+                agent=agent,
+                usage_date=timezone.localdate(),
+                defaults={"total_amount": Decimal("0"), "order_count": 0},
+            )
+            if not created:
+                usage = AgentDailyRemittanceUsage.objects.select_for_update().get(pk=usage.pk)
+            AgentRemittanceEligibilityPolicy().assert_eligible(agent, agent_customer, quote.amount)
+        else:
+            if merchant is None:
+                raise BusinessException("MERCHANT_REQUIRED", "A merchant is required for this remittance", 400)
+            merchant = Merchant.objects.select_for_update().select_related("agent").get(pk=merchant.pk)
+            usage, created = MerchantDailyRemittanceUsage.objects.get_or_create(
+                merchant=merchant,
+                usage_date=timezone.localdate(),
+                defaults={"total_amount": Decimal("0"), "order_count": 0},
+            )
+            if not created:
+                usage = MerchantDailyRemittanceUsage.objects.select_for_update().get(pk=usage.pk)
+            RemittanceEligibilityPolicy().assert_eligible(
+                merchant,
+                quote.amount,
+                customer=agent_customer,
+                require_customer=(actor_type == "CUSTOMER"),
+            )
 
         from apps.compliance.services import scan_entity_lightweight
         scan = scan_entity_lightweight(
@@ -176,14 +222,17 @@ class RemittanceApplicationService:
         now = timezone.now()
         initial_status, agent_review_status = self.initial_review_state(merchant, actor_type)
         owner_user_id = order_user_id if order_user_id is not None else user_id
+        prefix = "A" if agent is not None else "M"
         order = PaymentOrder.objects.create(
             order_no=f"RMT{now:%Y%m%d%H%M%S}{uuid.uuid4().hex[:6].upper()}",
-            merchant_order_no=f"M{now:%Y%m%d%H%M%S}{uuid.uuid4().hex[:4].upper()}",
+            merchant_order_no=f"{prefix}{now:%Y%m%d%H%M%S}{uuid.uuid4().hex[:4].upper()}",
             unique_identification_no=generate_uin(),
             idempotency_key=idempotency_key,
             request_payload_hash=digest,
             quote=quote,
             merchant=merchant,
+            agent=agent,
+            agent_customer=agent_customer,
             user_id=str(owner_user_id) if owner_user_id else None,
             amount=quote.amount,
             currency=quote.to_currency,
@@ -206,7 +255,7 @@ class RemittanceApplicationService:
             beneficiary_address=payload.get("beneficiary_address", ""),
             remittance_purpose=payload.get("remittance_purpose", ""),
             contract_file=payload.get("contract_file", ""),
-            pay_method=PaymentOrder.PayMethod.WIRE_TRANSFER,
+            pay_method=payload.get("pay_method") or PaymentOrder.PayMethod.WIRE_TRANSFER,
             status=initial_status,
             agent_review_status=agent_review_status,
             expire_at=now + timedelta(days=7),
@@ -236,11 +285,20 @@ class RemittanceApplicationService:
         if not order.quote_id:
             return
         usage_date = timezone.localtime(order.created_at).date()
-        usage = MerchantDailyRemittanceUsage.objects.select_for_update().filter(
-            merchant=order.merchant,
-            usage_date=usage_date,
-            is_deleted=False,
-        ).first()
+        if order.agent_id:
+            usage = AgentDailyRemittanceUsage.objects.select_for_update().filter(
+                agent_id=order.agent_id,
+                usage_date=usage_date,
+                is_deleted=False,
+            ).first()
+        elif order.merchant_id:
+            usage = MerchantDailyRemittanceUsage.objects.select_for_update().filter(
+                merchant=order.merchant,
+                usage_date=usage_date,
+                is_deleted=False,
+            ).first()
+        else:
+            return
         if not usage:
             return
         usage.total_amount = max(Decimal("0"), usage.total_amount - order.amount)
