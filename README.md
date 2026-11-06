@@ -222,6 +222,6 @@ python manage.py run_scheduled_jobs --job refresh_sanction_lists
 
 ## 说明
 
-本仓库为 **可运行的教学 / 面试演示系统**，重点展示支付清算领域的业务拆分与工程实践，**不构成生产投产方案**。生产环境需补齐真实银行对接、密钥管理、高可用与审计合规等能力。
+本仓库为 **可运行的演示系统**，重点展示支付清算领域的业务拆分与工程实践，**不构成生产投产方案**。生产环境需补齐真实银行对接、密钥管理、高可用与审计合规等能力。
 
 如需了解模块细节，建议从 `apps/payment/`、`apps/account/`、`apps/reconciliation/`、`apps/settlement/` 与 `frontend/*/src/views/` 入手。
